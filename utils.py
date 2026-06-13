@@ -1,17 +1,17 @@
 from database import get_db, log_audit
 from datetime import datetime
 
-def create_bank_account(user_id, real_name, camelot_name, national_id, password):
-    """ایجاد حساب بانکی جدید"""
+def create_bank_account(user_id, username, real_name, camelot_name, national_id, password):
+    """ایجاد حساب بانکی جدید با username (برای ذخیره در دیتابیس)"""
     from database import generate_account_number, get_setting
     
     conn = get_db()
     c = conn.cursor()
     
-    # اضافه کردن کاربر
-    c.execute('''INSERT INTO users (telegram_id, real_name, camelot_name, national_id, role)
-                 VALUES (?, ?, ?, ?, 'citizen')''',
-              (user_id, real_name, camelot_name, national_id))
+    # اضافه کردن کاربر (با username)
+    c.execute('''INSERT INTO users (telegram_id, username, real_name, camelot_name, national_id, role)
+                 VALUES (?, ?, ?, ?, ?, 'citizen')''',
+              (user_id, username, real_name, camelot_name, national_id))
     user_db_id = c.lastrowid
     
     # ساخت شماره حساب
