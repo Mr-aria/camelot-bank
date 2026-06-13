@@ -1,7 +1,7 @@
 import sqlite3
 import random
 from datetime import datetime, timedelta
-from config import DB_NAME
+DB_NAME = "camelot_bank.db"
 
 def get_db():
     """دریافت اتصال به دیتابیس"""
