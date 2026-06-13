@@ -4,9 +4,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ConversationHandler
 import os
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-OWNER_ID = 1275490079  # عدد ثابت همان آیدی شما
+OWNER_ID = 1275490079
 KING_ID = 1275490079
-LOG_CHANNEL_ID = -1003999739601  # عدد ثابت
+LOG_CHANNEL_ID = -1003999739601
 EMPLOYEES_IDS = []
 from database import (
     init_db, get_db, get_user_by_telegram_id, get_account_by_user_id, 
