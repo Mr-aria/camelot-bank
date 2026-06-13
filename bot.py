@@ -3,25 +3,26 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ConversationHandler
 import os
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = 1275490079
 KING_ID = 1275490079
 LOG_CHANNEL_ID = -1003999739601
 EMPLOYEES_IDS = []
+
 from database import (
-    init_db, get_db, get_user_by_telegram_id, get_account_by_user_id, 
-    get_account_by_number, get_user_by_account_number, get_setting, 
+    init_db, get_db, get_user_by_telegram_id, get_account_by_user_id,
+    get_account_by_number, get_user_by_account_number, get_setting,
     generate_txid, log_audit
 )
 from utils import (
     create_bank_account, format_balance, format_receipt
 )
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# مراحل
 NAME_REAL, NAME_CAMELOT, NATIONAL_ID, PASSWORD, CONFIRM = range(5)
 TRANSFER_ACCOUNT, TRANSFER_AMOUNT, TRANSFER_REASON, TRANSFER_PASSWORD = range(10, 14)
 
@@ -69,7 +70,7 @@ async def start(update: Update, context):
     user_id = update.effective_user.id
     username = update.effective_user.username or "بدون یوزرنیم"
     user = get_user_by_telegram_id(user_id)
-    
+
     if not user:
         context.user_data['register_step'] = NAME_REAL
         context.user_data['username'] = username
@@ -79,12 +80,12 @@ async def start(update: Update, context):
             parse_mode='Markdown'
         )
         return NAME_REAL
-    
+
     acc = get_account_by_user_id(user['id'])
     if not acc:
         await update.message.reply_text("❌ خطا در سیستم.")
         return
-    
+
     welcome = get_setting('welcome_message') or "درود👋\nخوش اومدین به بانک کملوت💰"
     await update.message.reply_text(welcome, reply_markup=main_menu_keyboard(user['role']))
     return ConversationHandler.END
@@ -210,25 +211,63 @@ async def register_handler(update: Update, context):
 async def confirm_callback(update: Update, context):
     query = update.callback_query
     await query.answer()
+    
     if query.data == "confirm_yes":
+        # گرفتن اطلاعات از context.user_data
         user_id = update.effective_user.id
-        acc_num, bonus = create_bank_account(
-            user_id,
-            context.user_data.get('username', ''),
-            context.user_data['real_name'],
-            context.user_data['camelot_name'],
-            context.user_data['national_id'],
-            context.user_data['password']
-        )
-        await query.edit_message_text(
-            f"✅ حساب شما ایجاد شد!\n🏦 شماره حساب: `{acc_num}`\n💰 موجودی اولیه: {bonus} ART\nبرای ادامه /start بزنید.",
-            parse_mode='Markdown'
-        )
-        await log_to_channel(context, f"🏦 حساب جدید: {context.user_data['camelot_name']} - {acc_num}")
-    else:
-        await query.edit_message_text("❌ ثبت‌نام لغو شد.")
-    for key in ['real_name','camelot_name','national_id','password','register_step','username']:
-        context.user_data.pop(key, None)
+        username = context.user_data.get('username', '')
+        real_name = context.user_data.get('real_name')
+        camelot_name = context.user_data.get('camelot_name')
+        national_id = context.user_data.get('national_id')
+        password = context.user_data.get('password')
+        
+        # بررسی کامل بودن اطلاعات
+        if not all([real_name, camelot_name, national_id, password]):
+            await query.edit_message_text("❌ خطا: اطلاعات کامل نیست. لطفاً دوباره /start کنید.")
+            # پاک کردن اطلاعات ناقص
+            for key in ['real_name','camelot_name','national_id','password','register_step','username']:
+                context.user_data.pop(key, None)
+            return
+        
+        try:
+            # ساخت حساب بانکی
+            acc_num, bonus = create_bank_account(
+                user_id,
+                username,
+                real_name,
+                camelot_name,
+                national_id,
+                password
+            )
+            
+            # پیام موفقیت
+            await query.edit_message_text(
+                f"✅ **حساب بانکی شما با موفقیت ایجاد شد!**\n\n"
+                f"🏦 **شماره حساب:** `{acc_num}`\n"
+                f"💰 **موجودی اولیه:** {bonus} ART\n"
+                f"⭐ **امتیاز اعتباری:** 1000\n\n"
+                f"برای ورود به بانک، دوباره /start بزنید.",
+                parse_mode='Markdown'
+            )
+            
+            # لاگ در کانال
+            try:
+                await log_to_channel(context, f"🏦 حساب جدید: {camelot_name} | شماره حساب: {acc_num}")
+            except:
+                pass
+            
+        except Exception as e:
+            logger.error(f"خطا در ساخت حساب: {e}")
+            await query.edit_message_text(f"❌ خطا در ساخت حساب: {str(e)}\nلطفاً دوباره /start کنید.")
+        
+        # پاک کردن اطلاعات موقت
+        for key in ['real_name','camelot_name','national_id','password','register_step','username']:
+            context.user_data.pop(key, None)
+            
+    else:  # confirm_no
+        await query.edit_message_text("❌ ثبت‌نام لغو شد. برای شروع مجدد /start بزنید.")
+        for key in ['real_name','camelot_name','national_id','password','register_step','username']:
+            context.user_data.pop(key, None)
 
 # ---------- انتقال وجه ----------
 async def transfer_start(update: Update, context):
@@ -329,7 +368,7 @@ async def transfer_password_handler(update: Update, context):
     receiver_account = context.user_data['transfer_receiver_account']
     receiver_acc = get_account_by_number(receiver_account)
     receiver_user = get_user_by_account_number(receiver_account)
-    fee = 0  # در صورت نیاز از تنظیمات بخوان
+    fee = 0
     total = amount + fee
     if sender_acc['balance'] - sender_acc['blocked_balance'] < total:
         await update.message.reply_text("❌ موجودی کافی نیست.")
