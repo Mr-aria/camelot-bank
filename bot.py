@@ -8,7 +8,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = 1275490079
 KING_ID = 1275490079
 LOG_CHANNEL_ID = -1003999739601
-EMPLOYEES_IDS = []
+EMPLOYEES_IDS = []  # آیدی کارمندها را اینجا اضافه کن
 
 from database import (
     init_db, get_db, get_user_by_telegram_id, get_account_by_user_id,
@@ -26,16 +26,31 @@ logger = logging.getLogger(__name__)
 NAME_REAL, NAME_CAMELOT, NATIONAL_ID, PASSWORD, CONFIRM = range(5)
 TRANSFER_ACCOUNT, TRANSFER_AMOUNT, TRANSFER_REASON, TRANSFER_PASSWORD = range(10, 14)
 
+def get_user_role_from_telegram_id(telegram_id):
+    """تعیین نقش بر اساس آیدی تلگرام"""
+    if telegram_id == OWNER_ID:
+        return 'owner'
+    elif telegram_id == KING_ID:
+        return 'king'
+    elif telegram_id in EMPLOYEES_IDS:
+        return 'employee'
+    return 'citizen'
+
 def is_admin(user_id: int) -> bool:
     user = get_user_by_telegram_id(user_id)
-    return user and user['role'] in ['king', 'owner', 'employee']
+    if user:
+        return user['role'] in ['king', 'owner', 'employee']
+    role = get_user_role_from_telegram_id(user_id)
+    return role in ['king', 'owner', 'employee']
 
 def get_user_role_display(user_id: int) -> str:
     user = get_user_by_telegram_id(user_id)
-    if not user:
-        return "شهروند"
+    if user:
+        roles = {'citizen':'شهروند','employee':'کارمند','king':'شاه','owner':'مالک'}
+        return roles.get(user['role'], 'شهروند')
+    role = get_user_role_from_telegram_id(user_id)
     roles = {'citizen':'شهروند','employee':'کارمند','king':'شاه','owner':'مالک'}
-    return roles.get(user['role'], 'شهروند')
+    return roles.get(role, 'شهروند')
 
 async def log_to_channel(context, message: str):
     try:
@@ -76,18 +91,37 @@ async def start(update: Update, context):
         context.user_data['username'] = username
         await update.message.reply_text(
             "🏦 **به بانک کملوت خوش آمدید!**\n\n"
-            "برای افتتاح حساب، نام واقعی خود را وارد کنید:",
+            "برای افتتاح حساب، نام واقعی خود را وارد کنید.\n"
+            "(برای لغو در هر مرحله، /cancel را بزنید)",
             parse_mode='Markdown'
         )
         return NAME_REAL
 
     acc = get_account_by_user_id(user['id'])
     if not acc:
-        await update.message.reply_text("❌ خطا در سیستم.")
+        await update.message.reply_text("❌ خطا در سیستم. لطفاً دوباره /start کنید.")
         return
 
     welcome = get_setting('welcome_message') or "درود👋\nخوش اومدین به بانک کملوت💰"
     await update.message.reply_text(welcome, reply_markup=main_menu_keyboard(user['role']))
+    return ConversationHandler.END
+
+async def cancel(update: Update, context):
+    """لغو هر عملیات و برگشت به منوی اصلی"""
+    user_id = update.effective_user.id
+    user = get_user_by_telegram_id(user_id)
+    if user:
+        acc = get_account_by_user_id(user['id'])
+        if acc:
+            await update.message.reply_text(
+                "❌ عملیات لغو شد.",
+                reply_markup=main_menu_keyboard(user['role'])
+            )
+        else:
+            await update.message.reply_text("❌ عملیات لغو شد.")
+    else:
+        await update.message.reply_text("❌ عملیات لغو شد.\nبرای شروع مجدد /start بزنید.")
+    context.user_data.clear()
     return ConversationHandler.END
 
 async def balance_callback(update: Update, context):
@@ -96,7 +130,7 @@ async def balance_callback(update: Update, context):
     user_id = update.effective_user.id
     user = get_user_by_telegram_id(user_id)
     if not user:
-        await query.edit_message_text("❌ حساب ندارید.")
+        await query.edit_message_text("❌ حساب ندارید. لطفاً /start بزنید.")
         return
     acc = get_account_by_user_id(user['id'])
     if not acc:
@@ -124,7 +158,60 @@ async def my_info_callback(update: Update, context):
 👑 نقش: {get_user_role_display(user_id)}
 📊 وضعیت: {status_persian}
 ━━━━━━━━━━━━━━━━━━━"""
-    await query.edit_message_text(info_text, reply_markup=main_menu_keyboard(user['role']), parse_mode='Markdown')
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 بررسی مجدد حساب", callback_data="refresh_role")],
+        [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_menu")]
+    ])
+    await query.edit_message_text(info_text, reply_markup=keyboard, parse_mode='Markdown')
+
+async def refresh_role(update: Update, context):
+    """بررسی مجدد نقش کاربر بر اساس آیدی تعریف شده در کد و به‌روزرسانی دیتابیس"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    # تعیین نقش واقعی بر اساس آیدی
+    if user_id == OWNER_ID:
+        new_role = 'owner'
+    elif user_id == KING_ID:
+        new_role = 'king'
+    elif user_id in EMPLOYEES_IDS:
+        new_role = 'employee'
+    else:
+        new_role = 'citizen'
+    
+    # دریافت کاربر از دیتابیس
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        await query.edit_message_text("❌ شما هنوز حساب بانکی ندارید. لطفاً اول /start کنید.")
+        return
+    
+    current_role = user['role']
+    if current_role == new_role:
+        await query.edit_message_text(
+            f"✅ نقش شما در حال حاضر همان {get_user_role_display(user_id)} است. تغییری لازم نیست.",
+            reply_markup=main_menu_keyboard(current_role)
+        )
+        return
+    
+    # به‌روزرسانی نقش در دیتابیس
+    db = get_db()
+    c = db.cursor()
+    c.execute("UPDATE users SET role = ? WHERE telegram_id = ?", (new_role, user_id))
+    db.commit()
+    db.close()
+    
+    # لاگ در سیستم
+    log_audit(user_id, 'role_refresh', f'old:{current_role}', f'new:{new_role}')
+    
+    await query.edit_message_text(
+        f"✅ **نقش شما با موفقیت به‌روز شد!**\n\n"
+        f"👑 نقش قبلی: {get_user_role_display(user_id)}\n"
+        f"⭐ نقش جدید: {get_user_role_from_telegram_id(user_id)}\n\n"
+        f"لطفاً دوباره از منوی اصلی استفاده کنید.",
+        reply_markup=main_menu_keyboard(new_role)
+    )
 
 async def my_credit_callback(update: Update, context):
     query = update.callback_query
@@ -135,8 +222,21 @@ async def my_credit_callback(update: Update, context):
         await query.edit_message_text("❌ اطلاعاتی یافت نشد.")
         return
     score = acc['credit_score']
-    rating = "🟢 عالی" if score >= 900 else "🟡 خوب" if score >= 700 else "🟠 متوسط" if score >= 500 else "🔴 ضعیف" if score >= 300 else "⚫ بدحساب"
-    await query.edit_message_text(f"📈 **اعتبار بانکی شما**\n━━━━━━━━━━━━━━━━━━━\n⭐ امتیاز: {score}\n🏷 رتبه: {rating}", reply_markup=main_menu_keyboard(user['role']), parse_mode='Markdown')
+    if score >= 900:
+        rating = "🟢 عالی"
+    elif score >= 700:
+        rating = "🟡 خوب"
+    elif score >= 500:
+        rating = "🟠 متوسط"
+    elif score >= 300:
+        rating = "🔴 ضعیف"
+    else:
+        rating = "⚫ بدحساب"
+    await query.edit_message_text(
+        f"📈 **اعتبار بانکی شما**\n━━━━━━━━━━━━━━━━━━━\n⭐ امتیاز: {score}\n🏷 رتبه: {rating}",
+        reply_markup=main_menu_keyboard(user['role']),
+        parse_mode='Markdown'
+    )
 
 async def panel_callback(update: Update, context):
     query = update.callback_query
@@ -146,10 +246,15 @@ async def panel_callback(update: Update, context):
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
     user = get_user_by_telegram_id(user_id)
-    panel_text = f"👑 **پنل مدیریت**\n👤 نقش: {get_user_role_display(user_id)}\n🕐 {datetime.now().strftime('%Y/%m/%d %H:%M')}"
-    keyboard = [[InlineKeyboardButton("👥 مدیریت کاربران", callback_data="admin_users")],
-                [InlineKeyboardButton("💰 مدیریت مالی", callback_data="admin_finance")],
-                [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]]
+    role_persian = get_user_role_display(user_id)
+    panel_text = f"👑 **پنل مدیریت**\n👤 نقش: {role_persian}\n🕐 {datetime.now().strftime('%Y/%m/%d %H:%M')}"
+    keyboard = [
+        [InlineKeyboardButton("👥 مدیریت کاربران", callback_data="admin_users")],
+        [InlineKeyboardButton("💰 مدیریت مالی", callback_data="admin_finance")],
+        [InlineKeyboardButton("🏦 مدیریت خزانه", callback_data="admin_treasury")],
+        [InlineKeyboardButton("📨 درخواست‌های pending", callback_data="admin_requests")],
+        [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_menu")]
+    ]
     await query.edit_message_text(panel_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def back_to_menu(update: Update, context):
@@ -158,7 +263,10 @@ async def back_to_menu(update: Update, context):
     user_id = update.effective_user.id
     user = get_user_by_telegram_id(user_id)
     role = user['role'] if user else 'citizen'
-    await query.edit_message_text(get_setting('welcome_message') or "منوی اصلی", reply_markup=main_menu_keyboard(role))
+    await query.edit_message_text(
+        get_setting('welcome_message') or "منوی اصلی",
+        reply_markup=main_menu_keyboard(role)
+    )
 
 # ---------- ثبت‌نام ----------
 async def register_handler(update: Update, context):
@@ -167,32 +275,41 @@ async def register_handler(update: Update, context):
     if step == NAME_REAL:
         context.user_data['real_name'] = text
         context.user_data['register_step'] = NAME_CAMELOT
-        await update.message.reply_text("⚔️ نام خود در کملوت را وارد کنید:", parse_mode='Markdown')
+        await update.message.reply_text(
+            "⚔️ نام خود در کملوت را وارد کنید:\n(برای لغو /cancel را بزنید)",
+            parse_mode='Markdown'
+        )
         return NAME_CAMELOT
     elif step == NAME_CAMELOT:
         context.user_data['camelot_name'] = text
         context.user_data['register_step'] = NATIONAL_ID
-        await update.message.reply_text("🆔 کد ملی ۶ رقمی را وارد کنید:", parse_mode='Markdown')
+        await update.message.reply_text(
+            "🆔 کد ملی ۶ رقمی را وارد کنید:\n(برای لغو /cancel را بزنید)",
+            parse_mode='Markdown'
+        )
         return NATIONAL_ID
     elif step == NATIONAL_ID:
         if not text.isdigit() or len(text) != 6:
-            await update.message.reply_text("❌ کد ملی ۶ رقم باید باشد.")
+            await update.message.reply_text("❌ کد ملی ۶ رقم باید باشد. دوباره وارد کنید:")
             return NATIONAL_ID
         db = get_db()
         c = db.cursor()
         c.execute('SELECT id FROM users WHERE national_id = ?', (text,))
         if c.fetchone():
             db.close()
-            await update.message.reply_text("❌ این کد ملی قبلاً ثبت شده.")
+            await update.message.reply_text("❌ این کد ملی قبلاً ثبت شده. لطفاً کد دیگری وارد کنید:")
             return NATIONAL_ID
         db.close()
         context.user_data['national_id'] = text
         context.user_data['register_step'] = PASSWORD
-        await update.message.reply_text("🔐 رمز ۴ رقمی برای حساب خود وارد کنید:", parse_mode='Markdown')
+        await update.message.reply_text(
+            "🔐 رمز ۴ رقمی برای حساب خود وارد کنید:\n(برای لغو /cancel را بزنید)",
+            parse_mode='Markdown'
+        )
         return PASSWORD
     elif step == PASSWORD:
         if not text.isdigit() or len(text) != 4:
-            await update.message.reply_text("❌ رمز ۴ رقم باید باشد.")
+            await update.message.reply_text("❌ رمز ۴ رقم باید باشد. دوباره وارد کنید:")
             return PASSWORD
         context.user_data['password'] = text
         context.user_data['register_step'] = CONFIRM
@@ -202,8 +319,10 @@ async def register_handler(update: Update, context):
 🆔 کد ملی: {context.user_data['national_id']}
 🔐 رمز: ****
 آیا صحیح است؟"""
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ بله", callback_data="confirm_yes")],
-                                         [InlineKeyboardButton("❌ خیر", callback_data="confirm_no")]])
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ بله", callback_data="confirm_yes")],
+            [InlineKeyboardButton("❌ خیر (لغو)", callback_data="confirm_no")]
+        ])
         await update.message.reply_text(confirm_text, reply_markup=keyboard, parse_mode='Markdown')
         return CONFIRM
     return ConversationHandler.END
@@ -213,7 +332,6 @@ async def confirm_callback(update: Update, context):
     await query.answer()
     
     if query.data == "confirm_yes":
-        # گرفتن اطلاعات از context.user_data
         user_id = update.effective_user.id
         username = context.user_data.get('username', '')
         real_name = context.user_data.get('real_name')
@@ -221,16 +339,14 @@ async def confirm_callback(update: Update, context):
         national_id = context.user_data.get('national_id')
         password = context.user_data.get('password')
         
-        # بررسی کامل بودن اطلاعات
         if not all([real_name, camelot_name, national_id, password]):
             await query.edit_message_text("❌ خطا: اطلاعات کامل نیست. لطفاً دوباره /start کنید.")
-            # پاک کردن اطلاعات ناقص
             for key in ['real_name','camelot_name','national_id','password','register_step','username']:
                 context.user_data.pop(key, None)
             return
         
         try:
-            # ساخت حساب بانکی
+            # ساخت حساب با نقش پیش‌فرض شهروند
             acc_num, bonus = create_bank_account(
                 user_id,
                 username,
@@ -240,19 +356,28 @@ async def confirm_callback(update: Update, context):
                 password
             )
             
-            # پیام موفقیت
+            # تعیین نقش واقعی بر اساس آیدی تلگرام و به‌روزرسانی دیتابیس
+            real_role = get_user_role_from_telegram_id(user_id)
+            if real_role != 'citizen':
+                db = get_db()
+                c = db.cursor()
+                c.execute("UPDATE users SET role = ? WHERE telegram_id = ?", (real_role, user_id))
+                db.commit()
+                db.close()
+                logger.info(f"نقش کاربر {user_id} به {real_role} تغییر کرد.")
+            
             await query.edit_message_text(
                 f"✅ **حساب بانکی شما با موفقیت ایجاد شد!**\n\n"
                 f"🏦 **شماره حساب:** `{acc_num}`\n"
                 f"💰 **موجودی اولیه:** {bonus} ART\n"
-                f"⭐ **امتیاز اعتباری:** 1000\n\n"
+                f"⭐ **امتیاز اعتباری:** 1000\n"
+                f"👑 **نقش شما:** {get_user_role_display(user_id)}\n\n"
                 f"برای ورود به بانک، دوباره /start بزنید.",
                 parse_mode='Markdown'
             )
             
-            # لاگ در کانال
             try:
-                await log_to_channel(context, f"🏦 حساب جدید: {camelot_name} | شماره حساب: {acc_num}")
+                await log_to_channel(context, f"🏦 حساب جدید: {camelot_name} | شماره حساب: {acc_num} | نقش: {get_user_role_display(user_id)}")
             except:
                 pass
             
@@ -260,7 +385,6 @@ async def confirm_callback(update: Update, context):
             logger.error(f"خطا در ساخت حساب: {e}")
             await query.edit_message_text(f"❌ خطا در ساخت حساب: {str(e)}\nلطفاً دوباره /start کنید.")
         
-        # پاک کردن اطلاعات موقت
         for key in ['real_name','camelot_name','national_id','password','register_step','username']:
             context.user_data.pop(key, None)
             
@@ -269,7 +393,7 @@ async def confirm_callback(update: Update, context):
         for key in ['real_name','camelot_name','national_id','password','register_step','username']:
             context.user_data.pop(key, None)
 
-# ---------- انتقال وجه ----------
+# ---------- انتقال وجه (توابع موجود) ----------
 async def transfer_start(update: Update, context):
     query = update.callback_query
     await query.answer()
@@ -279,7 +403,7 @@ async def transfer_start(update: Update, context):
         await query.edit_message_text("❌ حساب مسدود یا وجود ندارد.")
         return
     context.user_data['transfer_step'] = TRANSFER_ACCOUNT
-    await query.edit_message_text("💸 شماره حساب مقصد (۶ رقم) را وارد کنید:", parse_mode='Markdown')
+    await query.edit_message_text("💸 شماره حساب مقصد (۶ رقم) را وارد کنید:\n(برای لغو /cancel بزنید)", parse_mode='Markdown')
     return TRANSFER_ACCOUNT
 
 async def transfer_account_handler(update: Update, context):
@@ -333,7 +457,7 @@ async def transfer_amount_handler(update: Update, context):
         return TRANSFER_AMOUNT
     context.user_data['transfer_amount'] = amount
     context.user_data['transfer_step'] = TRANSFER_REASON
-    await update.message.reply_text(f"💰 مبلغ: {amount} ART\n📝 علت (اختیاری، «ندارد» برای رد):")
+    await update.message.reply_text(f"💰 مبلغ: {amount} ART\n📝 علت (اختیاری، «ندارد» برای رد):\n(برای لغو /cancel بزنید)")
     return TRANSFER_REASON
 
 async def transfer_reason_handler(update: Update, context):
@@ -346,7 +470,7 @@ async def transfer_reason_handler(update: Update, context):
     reason = text if text.lower() != 'ندارد' else None
     context.user_data['transfer_reason'] = reason
     context.user_data['transfer_step'] = TRANSFER_PASSWORD
-    await update.message.reply_text(f"🔐 رمز ۴ رقمی خود را وارد کنید:")
+    await update.message.reply_text(f"🔐 رمز ۴ رقمی خود را وارد کنید:\n(برای لغو /cancel بزنید)")
     return TRANSFER_PASSWORD
 
 async def transfer_password_handler(update: Update, context):
@@ -401,34 +525,55 @@ async def placeholder_handler(update: Update, context):
     user_id = update.effective_user.id
     user = get_user_by_telegram_id(user_id)
     role = user['role'] if user else 'citizen'
-    await query.edit_message_text("⏳ در حال تکمیل...", reply_markup=main_menu_keyboard(role))
+    keyboard = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_menu")]]
+    await query.edit_message_text(
+        "⏳ این بخش در حال تکمیل است... به زودی اضافه خواهد شد.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
+    
+    # ثبت‌نام
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("start", start)],
-        states={NAME_REAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_handler)],
-                NAME_CAMELOT: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_handler)],
-                NATIONAL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_handler)],
-                PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_handler)],
-                CONFIRM: [CallbackQueryHandler(confirm_callback)]},
-        fallbacks=[CommandHandler("start", start)]))
+        states={
+            NAME_REAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_handler)],
+            NAME_CAMELOT: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_handler)],
+            NATIONAL_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_handler)],
+            PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_handler)],
+            CONFIRM: [CallbackQueryHandler(confirm_callback)],
+        },
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
+    ))
+    
+    # انتقال وجه
     app.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(transfer_start, pattern="^transfer$")],
-        states={TRANSFER_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_account_handler)],
-                TRANSFER_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_amount_handler)],
-                TRANSFER_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_reason_handler)],
-                TRANSFER_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_password_handler)]},
-        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", start)]))
+        states={
+            TRANSFER_ACCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_account_handler)],
+            TRANSFER_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_amount_handler)],
+            TRANSFER_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_reason_handler)],
+            TRANSFER_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_password_handler)],
+        },
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
+    ))
+    
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancel", cancel))
+    
     app.add_handler(CallbackQueryHandler(balance_callback, pattern="^balance$"))
     app.add_handler(CallbackQueryHandler(my_info_callback, pattern="^my_info$"))
     app.add_handler(CallbackQueryHandler(my_credit_callback, pattern="^my_credit$"))
     app.add_handler(CallbackQueryHandler(panel_callback, pattern="^panel$"))
     app.add_handler(CallbackQueryHandler(back_to_menu, pattern="^back_to_menu$"))
-    for p in ["loan","my_transactions","notifications","settings","change_account","support","admin_users","admin_finance"]:
+    app.add_handler(CallbackQueryHandler(refresh_role, pattern="^refresh_role$"))
+    
+    for p in ["loan","my_transactions","notifications","settings","change_account","support",
+              "admin_users","admin_finance","admin_treasury","admin_requests"]:
         app.add_handler(CallbackQueryHandler(placeholder_handler, pattern=f"^{p}$"))
+    
     print("✅ ربات بانک کملوت روشن شد!")
     app.run_polling()
 
