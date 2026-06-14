@@ -1,5 +1,5 @@
 from database import get_db, log_audit
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import jdatetime
 
@@ -12,19 +12,14 @@ def create_bank_account(user_id, username, real_name, camelot_name, national_id,
     conn = get_db()
     c = conn.cursor()
     
-    # اضافه کردن کاربر (با username)
     c.execute('''INSERT INTO users (telegram_id, username, real_name, camelot_name, national_id, role)
                  VALUES (?, ?, ?, ?, ?, 'citizen')''',
               (user_id, username, real_name, camelot_name, national_id))
     user_db_id = c.lastrowid
     
-    # ساخت شماره حساب
     acc_num = generate_account_number()
-    
-    # موجودی اولیه
     bonus = int(get_setting('registration_bonus') or 0)
     
-    # اضافه کردن حساب
     c.execute('''INSERT INTO accounts (user_id, account_number, password, balance, credit_score)
                  VALUES (?, ?, ?, ?, 1000)''',
               (user_db_id, acc_num, password, bonus))
@@ -55,7 +50,6 @@ def format_balance(balance, blocked=0):
 ✅ قابل برداشت: {usable} ART"""
 
 def format_receipt(txid, tx_type, sender_info, receiver_info, amount, fee=0, reason=None):
-    """ساخت رسید رسمی با تاریخ شمسی"""
     now = datetime.now(TEHRAN_TZ)
     jnow = jdatetime.datetime.fromgregorian(datetime=now)
     jalali_date = jnow.strftime("%Y/%m/%d - %H:%M")
@@ -82,7 +76,6 @@ def format_receipt(txid, tx_type, sender_info, receiver_info, amount, fee=0, rea
     return receipt
 
 def send_notification(user_id, title, message):
-    """ذخیره پیام در صندوق پیام کاربر"""
     from database import get_db
     conn = get_db()
     c = conn.cursor()
@@ -104,3 +97,117 @@ def update_credit_score(account_id, new_score, reason):
                   (account_id, old_score, new_score, reason))
         conn.commit()
     conn.close()
+
+# ---------- توابع وام ----------
+def get_avg_monthly_turnover(account_number):
+    """محاسبه میانگین گردش ماهانه (مبلغ تراکنش‌های خروجی)"""
+    from database import get_db
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''
+        SELECT AVG(amount) as avg_monthly FROM (
+            SELECT SUM(amount) as amount 
+            FROM transactions 
+            WHERE sender_account = ? 
+            AND created_at >= date('now', '-3 months')
+            GROUP BY strftime('%Y-%m', created_at)
+        )
+    ''', (account_number,))
+    row = c.fetchone()
+    conn.close()
+    return row['avg_monthly'] if row and row['avg_monthly'] else 0
+
+def calculate_max_loan_amount(user_id):
+    """محاسبه حداکثر مبلغ وام مجاز برای کاربر"""
+    from database import get_db, get_account_by_user_id, get_user_by_telegram_id, get_loan_setting
+    multiplier = int(get_loan_setting('loan_max_multiplier_turnover') or 3)
+    divider = int(get_loan_setting('loan_credit_score_divider') or 10)
+    max_abs = int(get_loan_setting('loan_max_amount') or 1000000)
+    min_amt = int(get_loan_setting('loan_min_amount') or 1000)
+    
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        return 0
+    acc = get_account_by_user_id(user['id'])
+    if not acc:
+        return 0
+    
+    avg_turnover = get_avg_monthly_turnover(acc['account_number'])
+    credit_score = acc['credit_score']
+    
+    max_loan = (avg_turnover * multiplier) + (credit_score // divider)
+    
+    if max_loan < min_amt:
+        max_loan = min_amt
+    if max_loan > max_abs:
+        max_loan = max_abs
+    
+    return max_loan
+
+def has_active_loan(account_id):
+    from database import get_db
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT id FROM loans WHERE account_id = ? AND status IN ("active", "delayed")', (account_id,))
+    row = c.fetchone()
+    conn.close()
+    return row is not None
+
+def calculate_installments(amount, interest_rate, installments_count):
+    """محاسبه مبلغ هر قسط با احتساب سود"""
+    total_with_interest = amount + (amount * interest_rate / 100)
+    return total_with_interest / installments_count
+
+def get_loan_status_text(loan):
+    """دریافت وضعیت نمایشی وام"""
+    if loan['status'] == 'active':
+        return "✅ فعال"
+    elif loan['status'] == 'delayed':
+        return "⚠️ معوق"
+    elif loan['status'] == 'paid':
+        return "✅ تسویه شده"
+    else:
+        return "❌ نامشخص"
+
+def format_loan_info(loan, account):
+    """فرمت اطلاعات وام برای نمایش"""
+    from database import get_db
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) as total, SUM(amount) as paid FROM loan_payments WHERE loan_id = ? AND status = "paid"', (loan['id'],))
+    paid_info = c.fetchone()
+    conn.close()
+    
+    paid_installments = paid_info['total'] if paid_info else 0
+    paid_amount = paid_info['paid'] if paid_info else 0
+    
+    remaining = loan['remaining_amount'] - paid_amount + loan['fine']
+    
+    text = f"""🏦 **اطلاعات وام شما**
+━━━━━━━━━━━━━━━━━━━
+💰 مبلغ وام: {loan['amount']} ART
+📊 سود ({loan['interest']}%): {loan['amount'] * loan['interest'] // 100} ART
+💸 جریمه: {loan['fine']} ART
+📅 تعداد اقساط: {loan['installments']}
+✅ اقساط پرداخت شده: {paid_installments}
+📦 مانده بدهی: {remaining} ART
+📋 وضعیت: {get_loan_status_text(loan)}
+━━━━━━━━━━━━━━━━━━━"""
+    return text
+
+def check_and_block_low_credit(account_id):
+    """بررسی و بلوکه کردن حساب در صورت پایین بودن امتیاز اعتباری"""
+    from database import get_db, get_loan_setting
+    min_score = int(get_loan_setting('loan_min_credit_score_to_unblock') or 300)
+    
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT credit_score, user_id FROM accounts WHERE id = ?', (account_id,))
+    acc = c.fetchone()
+    if acc and acc['credit_score'] < min_score:
+        c.execute('UPDATE accounts SET status = "blocked" WHERE id = ?', (account_id,))
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    return False
