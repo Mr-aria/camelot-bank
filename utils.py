@@ -100,10 +100,11 @@ def update_credit_score(account_id, new_score, reason):
 
 # ---------- توابع وام ----------
 def get_avg_monthly_turnover(account_number):
-    """محاسبه میانگین گردش ماهانه (مبلغ تراکنش‌های خروجی)"""
+    """محاسبه میانگین گردش ماهانه (مبلغ تراکنش‌های خروجی) - در صورت نداشتن تراکنش، حداقل 0 برمی‌گرداند"""
     from database import get_db
     conn = get_db()
     c = conn.cursor()
+    # میانگین ۳ ماه اخیر
     c.execute('''
         SELECT AVG(amount) as avg_monthly FROM (
             SELECT SUM(amount) as amount 
@@ -115,7 +116,9 @@ def get_avg_monthly_turnover(account_number):
     ''', (account_number,))
     row = c.fetchone()
     conn.close()
-    return row['avg_monthly'] if row and row['avg_monthly'] else 0
+    if row and row['avg_monthly']:
+        return int(row['avg_monthly'])
+    return 0
 
 def calculate_max_loan_amount(user_id):
     """محاسبه حداکثر مبلغ وام مجاز برای کاربر"""
