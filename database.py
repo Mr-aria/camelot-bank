@@ -1,6 +1,6 @@
 import sqlite3
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import jdatetime
 
@@ -69,6 +69,7 @@ def init_db():
         paid_installments INTEGER DEFAULT 0,
         status TEXT DEFAULT 'active',
         due_date TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (account_id) REFERENCES accounts(id)
     )''')
     
@@ -139,20 +140,55 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     
-    # تنظیمات پیش‌فرض
+    # 12. loan_settings (جدول تنظیمات وام)
+    c.execute('''CREATE TABLE IF NOT EXISTS loan_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )''')
+    
+    # 13. loan_payments (تاریخچه اقساط وام)
+    c.execute('''CREATE TABLE IF NOT EXISTS loan_payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        loan_id INTEGER,
+        installment_number INTEGER,
+        amount INTEGER,
+        due_date TIMESTAMP,
+        paid_date TIMESTAMP,
+        fine INTEGER DEFAULT 0,
+        credit_penalty INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'pending',
+        FOREIGN KEY (loan_id) REFERENCES loans(id)
+    )''')
+    
+    # تنظیمات پیش‌فرض عمومی
     default_settings = [
         ('registration_bonus', '100'),
         ('transfer_fee_percent', '0'),
         ('transfer_fee_fixed', '0'),
         ('monthly_transfer_limit', '50000'),
         ('suspicious_limit', '30000'),
-        ('loan_interest', '5'),
-        ('loan_fine', '2'),
-        ('loan_min_score', '500'),
         ('welcome_message', 'درود👋\nخوش اومدین به بانک کملوت💰\n\nبرای انجام عملیات های بانکی خود، از منوی ربات استفاده کنید.'),
     ]
     for key, value in default_settings:
         c.execute('INSERT OR IGNORE INTO system_settings (key, value) VALUES (?, ?)', (key, value))
+    
+    # تنظیمات پیش‌فرض وام
+    loan_default_settings = [
+        ('loan_min_amount', '1000'),                   # حداقل مبلغ وام
+        ('loan_max_amount', '1000000'),                # حداکثر مبلغ وام (مطلق)
+        ('loan_grace_period_days', '14'),              # مهلت هر قسط به روز
+        ('loan_daily_fine_percent', '1'),              # جریمه روزانه درصد از هر قسط
+        ('loan_daily_credit_penalty', '1'),            # کاهش امتیاز روزانه (بر حسب امتیاز)
+        ('loan_min_credit_score_to_unblock', '300'),   # حداقل امتیاز برای عدم بلوکه
+        ('loan_delay_days_to_block', '30'),            # تعداد روز تاخیر برای بلوکه حساب
+        ('loan_interest_rate_percent', '5'),           # نرخ سود وام (درصد از اصل وام، به هر قسط اضافه می‌شود)
+        ('loan_early_payment_bonus_percent', '20'),    # پاداش تسویه زودهنگام (درصد از کل وام به عنوان امتیاز)
+        ('loan_max_multiplier_turnover', '3'),         # ضریب گردش مالی برای محاسبه سقف وام
+        ('loan_credit_score_divider', '10'),           # تقسیم‌کننده امتیاز اعتباری برای محاسبه سقف وام
+        ('loan_default_installments', '6'),            # تعداد اقساط پیش‌فرض
+    ]
+    for key, value in loan_default_settings:
+        c.execute('INSERT OR IGNORE INTO loan_settings (key, value) VALUES (?, ?)', (key, value))
     
     conn.commit()
     conn.close()
@@ -174,6 +210,30 @@ def set_setting(key, value):
     conn.commit()
     conn.close()
 
+def get_loan_setting(key):
+    """دریافت تنظیمات وام"""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT value FROM loan_settings WHERE key = ?', (key,))
+    row = c.fetchone()
+    conn.close()
+    return row['value'] if row else None
+
+def set_loan_setting(key, value):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('INSERT OR REPLACE INTO loan_settings (key, value) VALUES (?, ?)', (key, value))
+    conn.commit()
+    conn.close()
+
+def get_all_loan_settings():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT key, value FROM loan_settings')
+    rows = c.fetchall()
+    conn.close()
+    return {row['key']: row['value'] for row in rows}
+
 def generate_account_number():
     conn = get_db()
     c = conn.cursor()
@@ -185,7 +245,6 @@ def generate_account_number():
             return acc_num
 
 def generate_txid():
-    """تولید شناسه یکتا برای تراکنش با تاریخ شمسی"""
     now = datetime.now(TEHRAN_TZ)
     jnow = jdatetime.datetime.fromgregorian(datetime=now)
     date_part = jnow.strftime("%Y%m%d")
@@ -254,3 +313,100 @@ def send_notification(user_id, title, message):
               (user_id, title, message))
     conn.commit()
     conn.close()
+
+# ---------- توابع وام ----------
+def get_active_loan(account_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT * FROM loans WHERE account_id = ? AND status IN ("active", "delayed")', (account_id,))
+    loan = c.fetchone()
+    conn.close()
+    return loan
+
+def create_loan(account_id, amount, installments, interest_rate):
+    from utils import calculate_installments
+    conn = get_db()
+    c = conn.cursor()
+    
+    total_with_interest = amount + (amount * interest_rate / 100)
+    installment_amount = total_with_interest // installments
+    remainder = total_with_interest % installments
+    
+    # ایجاد وام
+    c.execute('''INSERT INTO loans (account_id, amount, remaining_amount, interest, installments, paid_installments, status, due_date)
+                 VALUES (?, ?, ?, ?, ?, 0, 'active', ?)''',
+              (account_id, amount, total_with_interest, interest_rate, installments, datetime.now(TEHRAN_TZ)))
+    loan_id = c.lastrowid
+    
+    # ایجاد اقساط
+    grace_days = int(get_loan_setting('loan_grace_period_days') or 14)
+    for i in range(installments):
+        due_date = datetime.now(TEHRAN_TZ) + timedelta(days=grace_days * (i + 1))
+        amt = installment_amount + (1 if i == installments - 1 else 0)  # اضافه کردن باقی‌مانده به آخرین قسط
+        c.execute('''INSERT INTO loan_payments (loan_id, installment_number, amount, due_date, status)
+                     VALUES (?, ?, ?, ?, 'pending')''',
+                  (loan_id, i + 1, amt, due_date))
+    
+    conn.commit()
+    conn.close()
+    return loan_id
+
+def apply_loan_penalties(loan_id):
+    """اعمال جریمه و کاهش امتیاز برای اقساط معوق"""
+    conn = get_db()
+    c = conn.cursor()
+    
+    # دریافت وام
+    c.execute('SELECT * FROM loans WHERE id = ?', (loan_id,))
+    loan = c.fetchone()
+    if not loan:
+        conn.close()
+        return
+    
+    # دریافت اقساط پرداخت نشده
+    c.execute('SELECT * FROM loan_payments WHERE loan_id = ? AND status = "pending" AND due_date < ?', 
+              (loan_id, datetime.now(TEHRAN_TZ)))
+    payments = c.fetchall()
+    
+    daily_fine_percent = int(get_loan_setting('loan_daily_fine_percent') or 1)
+    daily_credit_penalty = int(get_loan_setting('loan_daily_credit_penalty') or 1)
+    
+    total_fine = 0
+    total_credit_penalty = 0
+    
+    for payment in payments:
+        due = datetime.strptime(payment['due_date'], '%Y-%m-%d %H:%M:%S.%f')
+        now = datetime.now(TEHRAN_TZ)
+        if now > due:
+            delay_days = (now - due).days
+            if delay_days > 0:
+                fine = (payment['amount'] * daily_fine_percent // 100) * delay_days
+                credit_penalty = daily_credit_penalty * delay_days
+                total_fine += fine
+                total_credit_penalty += credit_penalty
+                # به‌روزرسانی جریمه قسط
+                c.execute('UPDATE loan_payments SET fine = ?, credit_penalty = ? WHERE id = ?', 
+                          (fine, credit_penalty, payment['id']))
+    
+    if total_fine > 0:
+        c.execute('UPDATE loans SET fine = fine + ? WHERE id = ?', (total_fine, loan_id))
+    
+    conn.commit()
+    conn.close()
+    
+    # کاهش امتیاز اعتباری حساب
+    if total_credit_penalty > 0:
+        c = conn.cursor()
+        c.execute('SELECT credit_score, user_id FROM accounts WHERE id = ?', (loan['account_id'],))
+        acc = c.fetchone()
+        if acc:
+            new_score = acc['credit_score'] - total_credit_penalty
+            if new_score < 0:
+                new_score = 0
+            c.execute('UPDATE accounts SET credit_score = ? WHERE id = ?', (new_score, loan['account_id']))
+            c.execute('INSERT INTO credit_history (account_id, old_score, new_score, reason) VALUES (?, ?, ?, ?)',
+                      (loan['account_id'], acc['credit_score'], new_score, f'جریمه تأخیر وام {loan_id}'))
+            conn.commit()
+        conn.close()
+    
+    return total_fine, total_credit_penalty
