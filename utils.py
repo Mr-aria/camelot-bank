@@ -1,6 +1,7 @@
 from database import get_db, log_audit
 from datetime import datetime
 import pytz
+import jdatetime
 
 TEHRAN_TZ = pytz.timezone('Asia/Tehran')
 
@@ -54,7 +55,11 @@ def format_balance(balance, blocked=0):
 ✅ قابل برداشت: {usable} ART"""
 
 def format_receipt(txid, tx_type, sender_info, receiver_info, amount, fee=0, reason=None):
-    """ساخت رسید رسمی با زمان تهران"""
+    """ساخت رسید رسمی با تاریخ شمسی"""
+    now = datetime.now(TEHRAN_TZ)
+    jnow = jdatetime.datetime.fromgregorian(datetime=now)
+    jalali_date = jnow.strftime("%Y/%m/%d - %H:%M")
+    
     receipt = f"""🏦 بانک کملوت
 ━━━━━━━━━━━━━━━━━━━
 📄 شماره تراکنش: {txid}
@@ -71,7 +76,7 @@ def format_receipt(txid, tx_type, sender_info, receiver_info, amount, fee=0, rea
     receipt += f"\n👤 فرستنده: {sender_info}"
     receipt += f"\n👤 گیرنده: {receiver_info}"
     receipt += f"\n━━━━━━━━━━━━━━━━━━━"
-    receipt += f"\n🕐 تاریخ: {datetime.now(TEHRAN_TZ).strftime('%Y/%m/%d - %H:%M')}"
+    receipt += f"\n🕐 تاریخ: {jalali_date}"
     receipt += f"\n✅ وضعیت: موفق"
     
     return receipt
