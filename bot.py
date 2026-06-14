@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime
 import pytz
+import jdatetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ConversationHandler
 import os
@@ -20,7 +21,6 @@ from utils import (
     create_bank_account, format_balance, format_receipt
 )
 
-# تنظیم منطقه زمانی تهران
 TEHRAN_TZ = pytz.timezone('Asia/Tehran')
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -54,6 +54,12 @@ def get_user_role_display(user_id: int) -> str:
     role = get_user_role_from_telegram_id(user_id)
     roles = {'citizen':'شهروند','employee':'کارمند','king':'شاه','owner':'مالک'}
     return roles.get(role, 'شهروند')
+
+def get_jalali_date():
+    """بازگرداندن تاریخ و زمان شمسی"""
+    now = datetime.now(TEHRAN_TZ)
+    jnow = jdatetime.datetime.fromgregorian(datetime=now)
+    return jnow.strftime("%Y/%m/%d - %H:%M")
 
 async def log_to_channel(context, message: str):
     try:
@@ -150,8 +156,7 @@ async def my_info_callback(update: Update, context):
         await query.edit_message_text("❌ اطلاعاتی یافت نشد.")
         return
     status_persian = "✅ فعال" if acc['status'] == 'active' else "🚫 مسدود"
-    # زمان تهران
-    now_tehran = datetime.now(TEHRAN_TZ).strftime('%Y/%m/%d %H:%M')
+    now_jalali = get_jalali_date()
     info_text = f"""👤 **اطلاعات حساب شما**
 ━━━━━━━━━━━━━━━━━━━
 📛 نام واقعی: {user['real_name']}
@@ -161,7 +166,7 @@ async def my_info_callback(update: Update, context):
 ⭐ امتیاز اعتباری: {acc['credit_score']}
 👑 نقش: {get_user_role_display(user_id)}
 📊 وضعیت: {status_persian}
-🕐 آخرین به‌روزرسانی: {now_tehran}
+🕐 آخرین به‌روزرسانی: {now_jalali}
 ━━━━━━━━━━━━━━━━━━━"""
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 بررسی مجدد حساب", callback_data="refresh_role")],
@@ -244,8 +249,8 @@ async def panel_callback(update: Update, context):
         return
     user = get_user_by_telegram_id(user_id)
     role_persian = get_user_role_display(user_id)
-    now_tehran = datetime.now(TEHRAN_TZ).strftime('%Y/%m/%d %H:%M')
-    panel_text = f"👑 **پنل مدیریت**\n👤 نقش: {role_persian}\n🕐 {now_tehran}"
+    now_jalali = get_jalali_date()
+    panel_text = f"👑 **پنل مدیریت**\n👤 نقش: {role_persian}\n🕐 {now_jalali}"
     keyboard = [
         [InlineKeyboardButton("👥 مدیریت کاربران", callback_data="admin_users")],
         [InlineKeyboardButton("💰 مدیریت مالی", callback_data="admin_finance")],
@@ -255,7 +260,6 @@ async def panel_callback(update: Update, context):
     ]
     await query.edit_message_text(panel_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-# برگشت به پنل مدیریت (برای زیرمنوها)
 async def back_to_panel(update: Update, context):
     query = update.callback_query
     await query.answer()
@@ -512,15 +516,17 @@ async def placeholder_handler(update: Update, context):
     await query.answer()
     user_id = update.effective_user.id
     user = get_user_by_telegram_id(user_id)
-    role = user['role'] if user else 'citizen'
-    # دکمه برگشت به منوی قبلی (پنل مدیریت اگر از آنجا آمده باشد)
-    back_button = InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", callback_data="back_to_panel")
-    # اگر از پنل نیامده باشد، دکمه بازگشت به منوی اصلی
-    main_menu_button = InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_menu")
-    keyboard = [[back_button, main_menu_button]]
+    
+    # تعیین دکمه برگشت مرحله‌ای
+    # اگر کاربر از پنل مدیریت وارد شده، به پنل برگردد، در غیر این صورت به منوی اصلی
+    if user and user['role'] in ['king', 'owner', 'employee']:
+        back_button = InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", callback_data="back_to_panel")
+    else:
+        back_button = InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_menu")
+    
     await query.edit_message_text(
         "⏳ این بخش در حال تکمیل است... به زودی اضافه خواهد شد.",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup([[back_button]])
     )
 
 def main():
