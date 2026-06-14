@@ -512,17 +512,11 @@ async def transfer_password_handler(update: Update, context):
 async def placeholder_handler(update: Update, context):
     query = update.callback_query
     await query.answer()
-    user_id = update.effective_user.id
-    user = get_user_by_telegram_id(user_id)
     
-    if user and user['role'] in ['king', 'owner', 'employee']:
-        back_callback = "back_to_panel"
-    else:
-        back_callback = "back_to_menu"
-    
+    # حذف شرط مدیریتی - همه کاربران با دکمه برگشت به منوی اصلی می‌روند
     await query.edit_message_text(
         "⏳ این بخش در حال تکمیل است... به زودی اضافه خواهد شد.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data=back_callback)]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]])
     )
 
 def main():
