@@ -56,7 +56,6 @@ def get_user_role_display(user_id: int) -> str:
     return roles.get(role, 'شهروند')
 
 def get_jalali_date():
-    """بازگرداندن تاریخ و زمان شمسی"""
     now = datetime.now(TEHRAN_TZ)
     jnow = jdatetime.datetime.fromgregorian(datetime=now)
     return jnow.strftime("%Y/%m/%d - %H:%M")
@@ -170,7 +169,7 @@ async def my_info_callback(update: Update, context):
 ━━━━━━━━━━━━━━━━━━━"""
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 بررسی مجدد حساب", callback_data="refresh_role")],
-        [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_menu")]
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]
     ])
     await query.edit_message_text(info_text, reply_markup=keyboard, parse_mode='Markdown')
 
@@ -256,7 +255,7 @@ async def panel_callback(update: Update, context):
         [InlineKeyboardButton("💰 مدیریت مالی", callback_data="admin_finance")],
         [InlineKeyboardButton("🏦 مدیریت خزانه", callback_data="admin_treasury")],
         [InlineKeyboardButton("📨 درخواست‌های pending", callback_data="admin_requests")],
-        [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_menu")]
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]
     ]
     await query.edit_message_text(panel_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
@@ -341,7 +340,6 @@ async def confirm_callback(update: Update, context):
             for key in ['real_name','camelot_name','national_id','password','register_step','username']:
                 context.user_data.pop(key, None)
             return
-        # یک بار دیگر بررسی کد ملی تکراری (برای اطمینان)
         db = get_db()
         c = db.cursor()
         c.execute('SELECT id FROM users WHERE national_id = ?', (national_id,))
@@ -517,23 +515,20 @@ async def placeholder_handler(update: Update, context):
     user_id = update.effective_user.id
     user = get_user_by_telegram_id(user_id)
     
-    # تعیین دکمه برگشت مرحله‌ای
-    # اگر کاربر از پنل مدیریت وارد شده، به پنل برگردد، در غیر این صورت به منوی اصلی
     if user and user['role'] in ['king', 'owner', 'employee']:
-        back_button = InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", callback_data="back_to_panel")
+        back_callback = "back_to_panel"
     else:
-        back_button = InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_menu")
+        back_callback = "back_to_menu"
     
     await query.edit_message_text(
         "⏳ این بخش در حال تکمیل است... به زودی اضافه خواهد شد.",
-        reply_markup=InlineKeyboardMarkup([[back_button]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data=back_callback)]])
     )
 
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # ثبت‌نام
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -546,7 +541,6 @@ def main():
         fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
     ))
     
-    # انتقال وجه
     app.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(transfer_start, pattern="^transfer$")],
         states={
