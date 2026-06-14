@@ -1,5 +1,8 @@
 from database import get_db, log_audit
 from datetime import datetime
+import pytz
+
+TEHRAN_TZ = pytz.timezone('Asia/Tehran')
 
 def create_bank_account(user_id, username, real_name, camelot_name, national_id, password):
     """ایجاد حساب بانکی جدید با username (برای ذخیره در دیتابیس)"""
@@ -51,7 +54,7 @@ def format_balance(balance, blocked=0):
 ✅ قابل برداشت: {usable} ART"""
 
 def format_receipt(txid, tx_type, sender_info, receiver_info, amount, fee=0, reason=None):
-    """ساخت رسید رسمی"""
+    """ساخت رسید رسمی با زمان تهران"""
     receipt = f"""🏦 بانک کملوت
 ━━━━━━━━━━━━━━━━━━━
 📄 شماره تراکنش: {txid}
@@ -68,7 +71,7 @@ def format_receipt(txid, tx_type, sender_info, receiver_info, amount, fee=0, rea
     receipt += f"\n👤 فرستنده: {sender_info}"
     receipt += f"\n👤 گیرنده: {receiver_info}"
     receipt += f"\n━━━━━━━━━━━━━━━━━━━"
-    receipt += f"\n🕐 تاریخ: {datetime.now().strftime('%Y/%m/%d - %H:%M')}"
+    receipt += f"\n🕐 تاریخ: {datetime.now(TEHRAN_TZ).strftime('%Y/%m/%d - %H:%M')}"
     receipt += f"\n✅ وضعیت: موفق"
     
     return receipt
