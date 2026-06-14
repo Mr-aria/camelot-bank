@@ -37,6 +37,7 @@ TRANSFER_ACCOUNT, TRANSFER_AMOUNT, TRANSFER_REASON, TRANSFER_PASSWORD = range(10
 LOAN_AMOUNT, LOAN_INSTALLMENTS, LOAN_CONFIRM = range(15, 18)
 SETTING_KEY, SETTING_VALUE = range(18, 20)
 
+# ---------- توابع کمکی ----------
 def get_user_role_from_telegram_id(telegram_id):
     if telegram_id == OWNER_ID:
         return 'owner'
@@ -139,6 +140,7 @@ async def cancel(update: Update, context):
         await update.message.reply_text("❌ عملیات لغو شد.\nبرای شروع مجدد /start بزنید.")
     return ConversationHandler.END
 
+# ---------- بخش‌های عادی (موجودی، اطلاعات، اعتبار، پنل، برگشت) ----------
 async def balance_callback(update: Update, context):
     query = update.callback_query
     await query.answer()
@@ -560,6 +562,17 @@ async def loan_request_start(update: Update, context):
         await query.edit_message_text("❌ حساب بانکی یافت نشد.")
         return
     
+    # بررسی قفل بودن وام برای شهروندان
+    if user['role'] == 'citizen':
+        loan_enabled = get_loan_setting('loan_enabled_for_citizens')
+        if loan_enabled == '0':
+            await query.edit_message_text(
+                "❌ بخش وام در حال حاضر برای شهروندان غیرفعال شده است.\n"
+                "لطفاً بعداً مراجعه کنید.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="loan")]])
+            )
+            return
+    
     # بررسی وام فعال
     if has_active_loan(acc['id']):
         await query.edit_message_text(
@@ -681,6 +694,13 @@ async def loan_confirm_callback(update: Update, context):
         if not user:
             await query.edit_message_text("❌ خطا: کاربر یافت نشد.")
             return ConversationHandler.END
+        
+        # بررسی قفل بودن وام برای شهروندان (دوباره)
+        if user['role'] == 'citizen':
+            loan_enabled = get_loan_setting('loan_enabled_for_citizens')
+            if loan_enabled == '0':
+                await query.edit_message_text("❌ بخش وام در حال حاضر برای شهروندان غیرفعال است.")
+                return ConversationHandler.END
         
         acc = get_account_by_user_id(user['id'])
         if not acc:
@@ -858,7 +878,7 @@ async def loan_pay_confirm(update: Update, context):
     c.execute('SELECT paid_installments, installments, amount FROM loans WHERE id = ?', (payment['loan_id'],))
     loan = c.fetchone()
     if loan['paid_installments'] == loan['installments']:
-        c.execute('UPDATE loans SET status = "paid", remaining_amount = 0 WHERE id = ?', (payment['loan_id'],))
+        c.execute('UPDATE loans SET status = "paid" WHERE id = ?', (payment['loan_id'],))
         bonus_percent = int(get_loan_setting('loan_early_payment_bonus_percent') or 20)
         bonus_score = (loan['amount'] * bonus_percent // 100)
         if bonus_score > 0:
@@ -879,13 +899,31 @@ async def loan_pay_confirm(update: Update, context):
     
     log_audit(user_id, 'loan_payment', f'amount:{amount_to_pay}', f'installment:{payment["installment_number"]}')
     
-    await query.edit_message_text(
-        f"✅ **قسط شماره {payment['installment_number']} با موفقیت پرداخت شد!**\n\n"
-        f"💰 مبلغ پرداختی: {amount_to_pay} ART\n"
-        f"📦 موجودی جدید: {new_balance} ART",
-        reply_markup=main_menu_keyboard(user['role']),
-        parse_mode='Markdown'
-    )
+    # بررسی اینکه آیا قسط دیگری باقی مانده است
+    db2 = get_db()
+    c2 = db2.cursor()
+    c2.execute('SELECT id FROM loan_payments WHERE loan_id = ? AND status = "pending" ORDER BY installment_number', (payment['loan_id'],))
+    remaining = c2.fetchone()
+    db2.close()
+    
+    if remaining:
+        await query.edit_message_text(
+            f"✅ **قسط شماره {payment['installment_number']} با موفقیت پرداخت شد!**\n\n"
+            f"💰 مبلغ پرداختی: {amount_to_pay} ART\n"
+            f"📦 موجودی جدید: {new_balance} ART\n\n"
+            f"⚠️ قسط بعدی شما هنوز پرداخت نشده است. لطفاً برای پرداخت قسط بعدی دوباره به بخش وام مراجعه کنید.",
+            reply_markup=main_menu_keyboard(user['role']),
+            parse_mode='Markdown'
+        )
+    else:
+        await query.edit_message_text(
+            f"✅ **قسط شماره {payment['installment_number']} با موفقیت پرداخت شد!**\n\n"
+            f"💰 مبلغ پرداختی: {amount_to_pay} ART\n"
+            f"📦 موجودی جدید: {new_balance} ART\n\n"
+            f"🎉 **تبریک! وام شما به طور کامل تسویه شد.**",
+            reply_markup=main_menu_keyboard(user['role']),
+            parse_mode='Markdown'
+        )
     
     # بررسی بلوکه شدن حساب در صورت کاهش امتیاز
     if check_and_block_low_credit(acc['id']):
@@ -973,9 +1011,15 @@ async def admin_loan_settings(update: Update, context):
             'loan_early_payment_bonus_percent': 'پاداش تسویه زودهنگام (درصد)',
             'loan_max_multiplier_turnover': 'ضریب گردش مالی',
             'loan_credit_score_divider': 'تقسیم‌کننده امتیاز اعتباری',
-            'loan_default_installments': 'تعداد اقساط پیش‌فرض'
+            'loan_default_installments': 'تعداد اقساط پیش‌فرض',
+            'loan_enabled_for_citizens': 'فعال بودن وام برای شهروندان'
         }.get(key, key)
-        text += f"• **{display_name}**: `{value}`\n"
+        # نمایش وضعیت فعال/غیرفعال برای کلید مربوطه
+        if key == 'loan_enabled_for_citizens':
+            value_display = "✅ فعال" if value == '1' else "❌ غیرفعال"
+        else:
+            value_display = value
+        text += f"• **{display_name}**: `{value_display}`\n"
     
     text += "\nبرای تغییر هر مقدار، روی دکمه مربوطه کلیک کنید."
     
@@ -993,7 +1037,8 @@ async def admin_loan_settings(update: Update, context):
             'loan_early_payment_bonus_percent': 'پاداش تسویه',
             'loan_max_multiplier_turnover': 'ضریب گردش مالی',
             'loan_credit_score_divider': 'تقسیم‌کننده امتیاز',
-            'loan_default_installments': 'تعداد اقساط پیش‌فرض'
+            'loan_default_installments': 'تعداد اقساط پیش‌فرض',
+            'loan_enabled_for_citizens': 'فعال بودن وام برای شهروندان'
         }.get(key, key)
         keyboard.append([InlineKeyboardButton(f"✏️ {display_name}", callback_data=f"loan_setting_{key}")])
     keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="back_to_panel")])
@@ -1006,14 +1051,27 @@ async def loan_setting_click(update: Update, context):
     key = query.data.replace("loan_setting_", "")
     context.user_data['loan_setting_key'] = key
     current_value = get_loan_setting(key)
-    await query.edit_message_text(
-        f"⚙️ **تغییر تنظیمات وام**\n\n"
-        f"کلید: `{key}`\n"
-        f"مقدار فعلی: `{current_value}`\n\n"
-        f"لطفاً مقدار جدید را وارد کنید:\n"
-        f"(برای لغو /cancel بزنید)",
-        parse_mode='Markdown'
-    )
+    
+    # اگر کلید فعال/غیرفعال است، توضیح جداگانه
+    if key == 'loan_enabled_for_citizens':
+        await query.edit_message_text(
+            f"⚙️ **تغییر وضعیت وام برای شهروندان**\n\n"
+            f"وضعیت فعلی: {'فعال' if current_value == '1' else 'غیرفعال'}\n\n"
+            f"لطفاً مقدار جدید را وارد کنید:\n"
+            f"`1` برای فعال\n"
+            f"`0` برای غیرفعال\n"
+            f"(برای لغو /cancel بزنید)",
+            parse_mode='Markdown'
+        )
+    else:
+        await query.edit_message_text(
+            f"⚙️ **تغییر تنظیمات وام**\n\n"
+            f"کلید: `{key}`\n"
+            f"مقدار فعلی: `{current_value}`\n\n"
+            f"لطفاً مقدار جدید (عدد صحیح) را وارد کنید:\n"
+            f"(برای لغو /cancel بزنید)",
+            parse_mode='Markdown'
+        )
     return SETTING_VALUE
 
 async def loan_setting_value_handler(update: Update, context):
@@ -1029,16 +1087,24 @@ async def loan_setting_value_handler(update: Update, context):
         await update.message.reply_text("❌ خطا: کلید تنظیمات یافت نشد.")
         return ConversationHandler.END
     
-    try:
-        new_value = int(text)
-        if new_value < 0:
-            raise ValueError
-    except:
-        await update.message.reply_text("❌ مقدار باید یک عدد صحیح مثبت باشد. لطفاً دوباره وارد کنید:")
-        return SETTING_VALUE
+    # اعتبارسنجی
+    if key == 'loan_enabled_for_citizens':
+        if text not in ['0', '1']:
+            await update.message.reply_text("❌ مقدار باید 0 (غیرفعال) یا 1 (فعال) باشد. لطفاً دوباره وارد کنید:")
+            return SETTING_VALUE
+        new_value = text
+    else:
+        try:
+            new_value = int(text)
+            if new_value < 0:
+                raise ValueError
+        except:
+            await update.message.reply_text("❌ مقدار باید یک عدد صحیح مثبت باشد. لطفاً دوباره وارد کنید:")
+            return SETTING_VALUE
+        new_value = str(new_value)
     
-    set_loan_setting(key, str(new_value))
-    log_audit(user_id, 'loan_setting_change', key, str(new_value))
+    set_loan_setting(key, new_value)
+    log_audit(user_id, 'loan_setting_change', key, new_value)
     await update.message.reply_text(
         f"✅ تنظیمات وام با موفقیت به‌روز شد!\n"
         f"`{key}` = `{new_value}`",
@@ -1058,6 +1124,10 @@ async def placeholder_handler(update: Update, context):
 
 def main():
     init_db()
+    # اطمینان از وجود تنظیم loan_enabled_for_citizens در دیتابیس (اگر نبود ایجاد کن)
+    if get_loan_setting('loan_enabled_for_citizens') is None:
+        set_loan_setting('loan_enabled_for_citizens', '1')
+    
     app = Application.builder().token(BOT_TOKEN).build()
     
     # ثبت‌نام
