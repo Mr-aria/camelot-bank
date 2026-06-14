@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 NAME_REAL, NAME_CAMELOT, NATIONAL_ID, PASSWORD, CONFIRM = range(5)
 TRANSFER_ACCOUNT, TRANSFER_AMOUNT, TRANSFER_REASON, TRANSFER_PASSWORD = range(10, 14)
 LOAN_AMOUNT, LOAN_INSTALLMENTS, LOAN_CONFIRM = range(15, 18)
+SETTING_KEY, SETTING_VALUE = range(18, 20)
 
 def get_user_role_from_telegram_id(telegram_id):
     if telegram_id == OWNER_ID:
@@ -101,6 +102,7 @@ async def start(update: Update, context):
     user = get_user_by_telegram_id(user_id)
 
     if not user:
+        context.user_data.clear()
         context.user_data['register_step'] = NAME_REAL
         context.user_data['username'] = username
         await update.message.reply_text(
@@ -123,6 +125,7 @@ async def start(update: Update, context):
 async def cancel(update: Update, context):
     user_id = update.effective_user.id
     user = get_user_by_telegram_id(user_id)
+    context.user_data.clear()
     if user:
         acc = get_account_by_user_id(user['id'])
         if acc:
@@ -134,10 +137,8 @@ async def cancel(update: Update, context):
             await update.message.reply_text("❌ عملیات لغو شد.")
     else:
         await update.message.reply_text("❌ عملیات لغو شد.\nبرای شروع مجدد /start بزنید.")
-    context.user_data.clear()
     return ConversationHandler.END
 
-# ---------- بخش‌های عادی ----------
 async def balance_callback(update: Update, context):
     query = update.callback_query
     await query.answer()
@@ -262,6 +263,7 @@ async def panel_callback(update: Update, context):
         [InlineKeyboardButton("💰 مدیریت مالی", callback_data="admin_finance")],
         [InlineKeyboardButton("🏦 مدیریت خزانه", callback_data="admin_treasury")],
         [InlineKeyboardButton("📨 درخواست‌های pending", callback_data="admin_requests")],
+        [InlineKeyboardButton("⚙️ تنظیمات وام", callback_data="admin_loan_settings")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]
     ]
     await query.edit_message_text(panel_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -669,17 +671,17 @@ async def loan_confirm_callback(update: Update, context):
         user = get_user_by_telegram_id(user_id)
         if not user:
             await query.edit_message_text("❌ خطا: کاربر یافت نشد.")
-            return
+            return ConversationHandler.END
         
         acc = get_account_by_user_id(user['id'])
         if not acc:
             await query.edit_message_text("❌ خطا: حساب بانکی یافت نشد.")
-            return
+            return ConversationHandler.END
         
         # بررسی مجدد وام فعال
         if has_active_loan(acc['id']):
             await query.edit_message_text("❌ شما قبلاً یک وام فعال دارید.")
-            return
+            return ConversationHandler.END
         
         amount = context.user_data.get('loan_amount')
         installments = context.user_data.get('loan_installments')
@@ -687,7 +689,7 @@ async def loan_confirm_callback(update: Update, context):
         
         if not amount or not installments:
             await query.edit_message_text("❌ خطا: اطلاعات ناقص. لطفاً دوباره تلاش کنید.")
-            return
+            return ConversationHandler.END
         
         # ایجاد وام
         loan_id = create_loan(acc['id'], amount, installments, interest_rate)
@@ -718,12 +720,15 @@ async def loan_confirm_callback(update: Update, context):
             parse_mode='Markdown'
         )
         
+        # پاک کردن اطلاعات گفت‌وگو
         for key in ['loan_amount', 'loan_installments', 'loan_step']:
             context.user_data.pop(key, None)
+        return ConversationHandler.END
     else:
         await query.edit_message_text("❌ درخواست وام لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(update.effective_user.id)))
         for key in ['loan_amount', 'loan_installments', 'loan_step']:
             context.user_data.pop(key, None)
+        return ConversationHandler.END
 
 async def loan_pay_start(update: Update, context):
     query = update.callback_query
@@ -764,12 +769,10 @@ async def loan_pay_start(update: Update, context):
         )
         return
     
-    # نمایش اولین قسط معوق
     payment = payments[0]
     due_date = datetime.strptime(payment['due_date'], '%Y-%m-%d %H:%M:%S.%f')
     now = datetime.now(TEHRAN_TZ)
     is_delayed = now > due_date
-    
     delay_days = (now - due_date).days if is_delayed else 0
     
     context.user_data['loan_payment_id'] = payment['id']
@@ -847,7 +850,6 @@ async def loan_pay_confirm(update: Update, context):
     loan = c.fetchone()
     if loan['paid_installments'] == loan['installments']:
         c.execute('UPDATE loans SET status = "paid", remaining_amount = 0 WHERE id = ?', (payment['loan_id'],))
-        # پاداش تسویه زودهنگام
         bonus_percent = int(get_loan_setting('loan_early_payment_bonus_percent') or 20)
         bonus_score = (loan['amount'] * bonus_percent // 100)
         if bonus_score > 0:
@@ -920,7 +922,6 @@ async def loan_status_callback(update: Update, context):
     
     info = format_loan_info(loan, acc)
     
-    # اضافه کردن لیست اقساط
     payments_text = "\n\n📋 **لیست اقساط:**\n"
     for p in payments:
         status_icon = "✅" if p['status'] == 'paid' else "⏳"
@@ -937,6 +938,108 @@ async def loan_status_callback(update: Update, context):
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
+
+# ---------- تنظیمات وام (پنل مدیریت) ----------
+async def admin_loan_settings(update: Update, context):
+    """نمایش منوی تنظیمات وام"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    settings = get_all_loan_settings()
+    text = "⚙️ **تنظیمات وام بانک کملوت**\n━━━━━━━━━━━━━━━━━━━\n"
+    for key, value in settings.items():
+        # نمایش نام زیبا برای کلیدها
+        display_name = {
+            'loan_min_amount': 'حداقل مبلغ وام',
+            'loan_max_amount': 'حداکثر مبلغ وام',
+            'loan_grace_period_days': 'مهلت هر قسط (روز)',
+            'loan_daily_fine_percent': 'جریمه روزانه (درصد قسط)',
+            'loan_daily_credit_penalty': 'کاهش امتیاز روزانه',
+            'loan_min_credit_score_to_unblock': 'حداقل امتیاز برای عدم بلوکه',
+            'loan_delay_days_to_block': 'تأخیر روز برای بلوکه حساب',
+            'loan_interest_rate_percent': 'نرخ سود وام (درصد)',
+            'loan_early_payment_bonus_percent': 'پاداش تسویه زودهنگام (درصد)',
+            'loan_max_multiplier_turnover': 'ضریب گردش مالی',
+            'loan_credit_score_divider': 'تقسیم‌کننده امتیاز اعتباری',
+            'loan_default_installments': 'تعداد اقساط پیش‌فرض'
+        }.get(key, key)
+        text += f"• **{display_name}**: `{value}`\n"
+    
+    text += "\nبرای تغییر هر مقدار، روی دکمه مربوطه کلیک کنید."
+    
+    keyboard = []
+    for key in settings.keys():
+        display_name = {
+            'loan_min_amount': 'حداقل مبلغ',
+            'loan_max_amount': 'حداکثر مبلغ',
+            'loan_grace_period_days': 'مهلت هر قسط',
+            'loan_daily_fine_percent': 'جریمه روزانه',
+            'loan_daily_credit_penalty': 'کاهش امتیاز روزانه',
+            'loan_min_credit_score_to_unblock': 'حداقل امتیاز',
+            'loan_delay_days_to_block': 'تأخیر برای بلوکه',
+            'loan_interest_rate_percent': 'نرخ سود',
+            'loan_early_payment_bonus_percent': 'پاداش تسویه',
+            'loan_max_multiplier_turnover': 'ضریب گردش مالی',
+            'loan_credit_score_divider': 'تقسیم‌کننده امتیاز',
+            'loan_default_installments': 'تعداد اقساط پیش‌فرض'
+        }.get(key, key)
+        keyboard.append([InlineKeyboardButton(f"✏️ {display_name}", callback_data=f"loan_setting_{key}")])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="back_to_panel")])
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def loan_setting_click(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    key = query.data.replace("loan_setting_", "")
+    context.user_data['loan_setting_key'] = key
+    current_value = get_loan_setting(key)
+    await query.edit_message_text(
+        f"⚙️ **تغییر تنظیمات وام**\n\n"
+        f"کلید: `{key}`\n"
+        f"مقدار فعلی: `{current_value}`\n\n"
+        f"لطفاً مقدار جدید را وارد کنید:\n"
+        f"(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return SETTING_VALUE
+
+async def loan_setting_value_handler(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ تغییر تنظیمات لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        context.user_data.pop('loan_setting_key', None)
+        return ConversationHandler.END
+    
+    key = context.user_data.get('loan_setting_key')
+    if not key:
+        await update.message.reply_text("❌ خطا: کلید تنظیمات یافت نشد.")
+        return ConversationHandler.END
+    
+    # بررسی نوع مقدار (باید عدد باشد)
+    try:
+        new_value = int(text)
+        if new_value < 0:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ مقدار باید یک عدد صحیح مثبت باشد. لطفاً دوباره وارد کنید:")
+        return SETTING_VALUE
+    
+    set_loan_setting(key, str(new_value))
+    log_audit(user_id, 'loan_setting_change', key, str(new_value))
+    await update.message.reply_text(
+        f"✅ تنظیمات وام با موفقیت به‌روز شد!\n"
+        f"`{key}` = `{new_value}`",
+        parse_mode='Markdown',
+        reply_markup=main_menu_keyboard(get_user_role_display(user_id))
+    )
+    context.user_data.pop('loan_setting_key', None)
+    return ConversationHandler.END
 
 async def placeholder_handler(update: Update, context):
     query = update.callback_query
@@ -986,9 +1089,20 @@ def main():
         fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
     ))
     
-    # پرداخت وام (با ConversationHandler ساده)
+    # پرداخت وام (بدون ConversationHandler ساده)
     app.add_handler(CallbackQueryHandler(loan_pay_start, pattern="^loan_pay$"))
     app.add_handler(CallbackQueryHandler(loan_pay_confirm, pattern="^loan_pay_confirm$"))
+    
+    # تنظیمات وام
+    loan_setting_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(loan_setting_click, pattern="^loan_setting_")],
+        states={
+            SETTING_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, loan_setting_value_handler)],
+        },
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(loan_setting_conv)
+    app.add_handler(CallbackQueryHandler(admin_loan_settings, pattern="^admin_loan_settings$"))
     
     # سایر هندلرها
     app.add_handler(CommandHandler("start", start))
