@@ -1,7 +1,8 @@
 import sqlite3
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
+import jdatetime
 
 DB_NAME = "camelot_bank.db"
 TEHRAN_TZ = pytz.timezone('Asia/Tehran')
@@ -184,9 +185,10 @@ def generate_account_number():
             return acc_num
 
 def generate_txid():
-    """تولید شناسه یکتا برای تراکنش با زمان تهران"""
+    """تولید شناسه یکتا برای تراکنش با تاریخ شمسی"""
     now = datetime.now(TEHRAN_TZ)
-    date_part = now.strftime("%Y%m%d")
+    jnow = jdatetime.datetime.fromgregorian(datetime=now)
+    date_part = jnow.strftime("%Y%m%d")
     random_part = random.randint(1000, 9999)
     return f"TX-{date_part}-{random_part}"
 
