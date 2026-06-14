@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime
+import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ConversationHandler
 import os
@@ -18,6 +19,9 @@ from database import (
 from utils import (
     create_bank_account, format_balance, format_receipt
 )
+
+# تنظیم منطقه زمانی تهران
+TEHRAN_TZ = pytz.timezone('Asia/Tehran')
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
@@ -146,6 +150,8 @@ async def my_info_callback(update: Update, context):
         await query.edit_message_text("❌ اطلاعاتی یافت نشد.")
         return
     status_persian = "✅ فعال" if acc['status'] == 'active' else "🚫 مسدود"
+    # زمان تهران
+    now_tehran = datetime.now(TEHRAN_TZ).strftime('%Y/%m/%d %H:%M')
     info_text = f"""👤 **اطلاعات حساب شما**
 ━━━━━━━━━━━━━━━━━━━
 📛 نام واقعی: {user['real_name']}
@@ -155,6 +161,7 @@ async def my_info_callback(update: Update, context):
 ⭐ امتیاز اعتباری: {acc['credit_score']}
 👑 نقش: {get_user_role_display(user_id)}
 📊 وضعیت: {status_persian}
+🕐 آخرین به‌روزرسانی: {now_tehran}
 ━━━━━━━━━━━━━━━━━━━"""
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 بررسی مجدد حساب", callback_data="refresh_role")],
@@ -237,7 +244,8 @@ async def panel_callback(update: Update, context):
         return
     user = get_user_by_telegram_id(user_id)
     role_persian = get_user_role_display(user_id)
-    panel_text = f"👑 **پنل مدیریت**\n👤 نقش: {role_persian}\n🕐 {datetime.now().strftime('%Y/%m/%d %H:%M')}"
+    now_tehran = datetime.now(TEHRAN_TZ).strftime('%Y/%m/%d %H:%M')
+    panel_text = f"👑 **پنل مدیریت**\n👤 نقش: {role_persian}\n🕐 {now_tehran}"
     keyboard = [
         [InlineKeyboardButton("👥 مدیریت کاربران", callback_data="admin_users")],
         [InlineKeyboardButton("💰 مدیریت مالی", callback_data="admin_finance")],
@@ -246,6 +254,12 @@ async def panel_callback(update: Update, context):
         [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_menu")]
     ]
     await query.edit_message_text(panel_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+# برگشت به پنل مدیریت (برای زیرمنوها)
+async def back_to_panel(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    await panel_callback(update, context)
 
 async def back_to_menu(update: Update, context):
     query = update.callback_query
@@ -323,6 +337,15 @@ async def confirm_callback(update: Update, context):
             for key in ['real_name','camelot_name','national_id','password','register_step','username']:
                 context.user_data.pop(key, None)
             return
+        # یک بار دیگر بررسی کد ملی تکراری (برای اطمینان)
+        db = get_db()
+        c = db.cursor()
+        c.execute('SELECT id FROM users WHERE national_id = ?', (national_id,))
+        if c.fetchone():
+            db.close()
+            await query.edit_message_text("❌ این کد ملی قبلاً ثبت شده. لطفاً با کد دیگری ثبت‌نام کنید.")
+            return
+        db.close()
         try:
             acc_num, bonus = create_bank_account(
                 user_id, username, real_name, camelot_name, national_id, password
@@ -490,7 +513,11 @@ async def placeholder_handler(update: Update, context):
     user_id = update.effective_user.id
     user = get_user_by_telegram_id(user_id)
     role = user['role'] if user else 'citizen'
-    keyboard = [[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_menu")]]
+    # دکمه برگشت به منوی قبلی (پنل مدیریت اگر از آنجا آمده باشد)
+    back_button = InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", callback_data="back_to_panel")
+    # اگر از پنل نیامده باشد، دکمه بازگشت به منوی اصلی
+    main_menu_button = InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_menu")
+    keyboard = [[back_button, main_menu_button]]
     await query.edit_message_text(
         "⏳ این بخش در حال تکمیل است... به زودی اضافه خواهد شد.",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -499,6 +526,8 @@ async def placeholder_handler(update: Update, context):
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
+    
+    # ثبت‌نام
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -510,6 +539,8 @@ def main():
         },
         fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
     ))
+    
+    # انتقال وجه
     app.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(transfer_start, pattern="^transfer$")],
         states={
@@ -520,17 +551,22 @@ def main():
         },
         fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
     ))
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel))
+    
     app.add_handler(CallbackQueryHandler(balance_callback, pattern="^balance$"))
     app.add_handler(CallbackQueryHandler(my_info_callback, pattern="^my_info$"))
     app.add_handler(CallbackQueryHandler(my_credit_callback, pattern="^my_credit$"))
     app.add_handler(CallbackQueryHandler(panel_callback, pattern="^panel$"))
     app.add_handler(CallbackQueryHandler(back_to_menu, pattern="^back_to_menu$"))
+    app.add_handler(CallbackQueryHandler(back_to_panel, pattern="^back_to_panel$"))
     app.add_handler(CallbackQueryHandler(refresh_role, pattern="^refresh_role$"))
+    
     for p in ["loan","my_transactions","notifications","settings","change_account","support",
               "admin_users","admin_finance","admin_treasury","admin_requests"]:
         app.add_handler(CallbackQueryHandler(placeholder_handler, pattern=f"^{p}$"))
+    
     print("✅ ربات بانک کملوت روشن شد!")
     app.run_polling()
 
