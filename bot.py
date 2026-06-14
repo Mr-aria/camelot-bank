@@ -573,6 +573,15 @@ async def loan_request_start(update: Update, context):
     max_loan = calculate_max_loan_amount(user_id)
     min_loan = int(get_loan_setting('loan_min_amount') or 1000)
     
+    # اگر حداکثر وام کمتر از حداقل است، اجازه نده
+    if max_loan < min_loan:
+        await query.edit_message_text(
+            f"❌ متأسفانه بر اساس سابقه مالی شما، حداکثر وام مجاز ({max_loan} ART) کمتر از حداقل وام ({min_loan} ART) است.\n"
+            f"امکان دریافت وام برای شما وجود ندارد.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="loan")]])
+        )
+        return
+    
     context.user_data['loan_step'] = LOAN_AMOUNT
     await query.edit_message_text(
         f"📥 **درخواست وام جدید**\n\n"
@@ -952,7 +961,6 @@ async def admin_loan_settings(update: Update, context):
     settings = get_all_loan_settings()
     text = "⚙️ **تنظیمات وام بانک کملوت**\n━━━━━━━━━━━━━━━━━━━\n"
     for key, value in settings.items():
-        # نمایش نام زیبا برای کلیدها
         display_name = {
             'loan_min_amount': 'حداقل مبلغ وام',
             'loan_max_amount': 'حداکثر مبلغ وام',
@@ -1021,7 +1029,6 @@ async def loan_setting_value_handler(update: Update, context):
         await update.message.reply_text("❌ خطا: کلید تنظیمات یافت نشد.")
         return ConversationHandler.END
     
-    # بررسی نوع مقدار (باید عدد باشد)
     try:
         new_value = int(text)
         if new_value < 0:
@@ -1089,9 +1096,12 @@ def main():
         fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
     ))
     
-    # پرداخت وام (بدون ConversationHandler ساده)
+    # پرداخت وام
     app.add_handler(CallbackQueryHandler(loan_pay_start, pattern="^loan_pay$"))
     app.add_handler(CallbackQueryHandler(loan_pay_confirm, pattern="^loan_pay_confirm$"))
+    
+    # وضعیت وام
+    app.add_handler(CallbackQueryHandler(loan_status_callback, pattern="^loan_status$"))
     
     # تنظیمات وام
     loan_setting_conv = ConversationHandler(
@@ -1109,7 +1119,6 @@ def main():
     app.add_handler(CommandHandler("cancel", cancel))
     
     app.add_handler(CallbackQueryHandler(loan_menu_callback, pattern="^loan$"))
-    app.add_handler(CallbackQueryHandler(loan_status_callback, pattern="^loan_status$"))
     app.add_handler(CallbackQueryHandler(balance_callback, pattern="^balance$"))
     app.add_handler(CallbackQueryHandler(my_info_callback, pattern="^my_info$"))
     app.add_handler(CallbackQueryHandler(my_credit_callback, pattern="^my_credit$"))
