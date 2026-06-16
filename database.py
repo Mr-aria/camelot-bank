@@ -1,6 +1,6 @@
 import sqlite3
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 import jdatetime
 
@@ -140,13 +140,13 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     
-    # 12. loan_settings (جدول تنظیمات وام)
+    # 12. loan_settings
     c.execute('''CREATE TABLE IF NOT EXISTS loan_settings (
         key TEXT PRIMARY KEY,
         value TEXT
     )''')
     
-    # 13. loan_payments (تاریخچه اقساط وام)
+    # 13. loan_payments
     c.execute('''CREATE TABLE IF NOT EXISTS loan_payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         loan_id INTEGER,
@@ -174,18 +174,19 @@ def init_db():
     
     # تنظیمات پیش‌فرض وام
     loan_default_settings = [
-        ('loan_min_amount', '1000'),                   # حداقل مبلغ وام
-        ('loan_max_amount', '1000000'),                # حداکثر مبلغ وام (مطلق)
-        ('loan_grace_period_days', '14'),              # مهلت هر قسط به روز
-        ('loan_daily_fine_percent', '1'),              # جریمه روزانه درصد از هر قسط
-        ('loan_daily_credit_penalty', '1'),            # کاهش امتیاز روزانه (بر حسب امتیاز)
-        ('loan_min_credit_score_to_unblock', '300'),   # حداقل امتیاز برای عدم بلوکه
-        ('loan_delay_days_to_block', '30'),            # تعداد روز تاخیر برای بلوکه حساب
-        ('loan_interest_rate_percent', '5'),           # نرخ سود وام (درصد از اصل وام، به هر قسط اضافه می‌شود)
-        ('loan_early_payment_bonus_percent', '20'),    # پاداش تسویه زودهنگام (درصد از کل وام به عنوان امتیاز)
-        ('loan_max_multiplier_turnover', '3'),         # ضریب گردش مالی برای محاسبه سقف وام
-        ('loan_credit_score_divider', '10'),           # تقسیم‌کننده امتیاز اعتباری برای محاسبه سقف وام
-        ('loan_default_installments', '6'),            # تعداد اقساط پیش‌فرض
+        ('loan_min_amount', '1000'),
+        ('loan_max_amount', '1000000'),
+        ('loan_grace_period_days', '14'),
+        ('loan_daily_fine_percent', '1'),
+        ('loan_daily_credit_penalty', '1'),
+        ('loan_min_credit_score_to_unblock', '300'),
+        ('loan_delay_days_to_block', '30'),
+        ('loan_interest_rate_percent', '5'),
+        ('loan_early_payment_bonus_percent', '20'),
+        ('loan_max_multiplier_turnover', '3'),
+        ('loan_credit_score_divider', '10'),
+        ('loan_default_installments', '6'),
+        ('loan_enabled_for_citizens', '1'),
     ]
     for key, value in loan_default_settings:
         c.execute('INSERT OR IGNORE INTO loan_settings (key, value) VALUES (?, ?)', (key, value))
@@ -211,7 +212,6 @@ def set_setting(key, value):
     conn.close()
 
 def get_loan_setting(key):
-    """دریافت تنظیمات وام"""
     conn = get_db()
     c = conn.cursor()
     c.execute('SELECT value FROM loan_settings WHERE key = ?', (key,))
@@ -332,17 +332,15 @@ def create_loan(account_id, amount, installments, interest_rate):
     installment_amount = total_with_interest // installments
     remainder = total_with_interest % installments
     
-    # ایجاد وام
     c.execute('''INSERT INTO loans (account_id, amount, remaining_amount, interest, installments, paid_installments, status, due_date)
                  VALUES (?, ?, ?, ?, ?, 0, 'active', ?)''',
               (account_id, amount, total_with_interest, interest_rate, installments, datetime.now(TEHRAN_TZ)))
     loan_id = c.lastrowid
     
-    # ایجاد اقساط
     grace_days = int(get_loan_setting('loan_grace_period_days') or 14)
     for i in range(installments):
         due_date = datetime.now(TEHRAN_TZ) + timedelta(days=grace_days * (i + 1))
-        amt = installment_amount + (1 if i == installments - 1 else 0)  # اضافه کردن باقی‌مانده به آخرین قسط
+        amt = installment_amount + (1 if i == installments - 1 else 0)
         c.execute('''INSERT INTO loan_payments (loan_id, installment_number, amount, due_date, status)
                      VALUES (?, ?, ?, ?, 'pending')''',
                   (loan_id, i + 1, amt, due_date))
@@ -352,18 +350,15 @@ def create_loan(account_id, amount, installments, interest_rate):
     return loan_id
 
 def apply_loan_penalties(loan_id):
-    """اعمال جریمه و کاهش امتیاز برای اقساط معوق"""
     conn = get_db()
     c = conn.cursor()
     
-    # دریافت وام
     c.execute('SELECT * FROM loans WHERE id = ?', (loan_id,))
     loan = c.fetchone()
     if not loan:
         conn.close()
         return
     
-    # دریافت اقساط پرداخت نشده
     c.execute('SELECT * FROM loan_payments WHERE loan_id = ? AND status = "pending" AND due_date < ?', 
               (loan_id, datetime.now(TEHRAN_TZ)))
     payments = c.fetchall()
@@ -384,7 +379,6 @@ def apply_loan_penalties(loan_id):
                 credit_penalty = daily_credit_penalty * delay_days
                 total_fine += fine
                 total_credit_penalty += credit_penalty
-                # به‌روزرسانی جریمه قسط
                 c.execute('UPDATE loan_payments SET fine = ?, credit_penalty = ? WHERE id = ?', 
                           (fine, credit_penalty, payment['id']))
     
@@ -394,7 +388,6 @@ def apply_loan_penalties(loan_id):
     conn.commit()
     conn.close()
     
-    # کاهش امتیاز اعتباری حساب
     if total_credit_penalty > 0:
         c = conn.cursor()
         c.execute('SELECT credit_score, user_id FROM accounts WHERE id = ?', (loan['account_id'],))
@@ -410,3 +403,46 @@ def apply_loan_penalties(loan_id):
         conn.close()
     
     return total_fine, total_credit_penalty
+
+# ---------- توابع تراکنش ----------
+def get_user_transactions(user_id, limit=20, offset=0, tx_type=None):
+    """دریافت تراکنش‌های کاربر با صفحه‌بندی و فیلتر نوع"""
+    conn = get_db()
+    c = conn.cursor()
+    
+    acc = get_account_by_user_id(user_id)
+    if not acc:
+        conn.close()
+        return [], 0
+    
+    account_number = acc['account_number']
+    
+    query = '''
+        SELECT * FROM transactions 
+        WHERE sender_account = ? OR receiver_account = ?
+    '''
+    params = [account_number, account_number]
+    
+    if tx_type:
+        query += ' AND type = ?'
+        params.append(tx_type)
+    
+    count_query = query.replace('*', 'COUNT(*)')
+    c.execute(count_query, params)
+    total = c.fetchone()[0]
+    
+    query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
+    params.extend([limit, offset])
+    c.execute(query, params)
+    transactions = c.fetchall()
+    
+    conn.close()
+    return transactions, total
+
+def get_transaction_details(txid):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT * FROM transactions WHERE txid = ?', (txid,))
+    tx = c.fetchone()
+    conn.close()
+    return tx
