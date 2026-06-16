@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import jdatetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,13 +15,15 @@ EMPLOYEES_IDS = []
 from database import (
     init_db, get_db, get_user_by_telegram_id, get_account_by_user_id,
     get_account_by_number, get_user_by_account_number, get_setting,
-    generate_txid, log_audit
+    generate_txid, log_audit, get_user_transactions, get_transaction_details
 )
 from utils import (
-    create_bank_account, format_balance, format_receipt
+    create_bank_account, format_balance, format_receipt,
+    format_transaction_summary, format_transaction_detail
 )
 
 TEHRAN_TZ = pytz.timezone('Asia/Tehran')
+TRANSACTIONS_PER_PAGE = 10
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
@@ -30,6 +32,7 @@ logger = logging.getLogger(__name__)
 NAME_REAL, NAME_CAMELOT, NATIONAL_ID, PASSWORD, CONFIRM = range(5)
 TRANSFER_ACCOUNT, TRANSFER_AMOUNT, TRANSFER_REASON, TRANSFER_PASSWORD = range(10, 14)
 
+# ---------- توابع کمکی ----------
 def get_user_role_from_telegram_id(telegram_id):
     if telegram_id == OWNER_ID:
         return 'owner'
@@ -76,7 +79,6 @@ def main_menu_keyboard(user_role: str = 'citizen'):
     keyboard = [
         [InlineKeyboardButton("💰 موجودی", callback_data="balance")],
         [InlineKeyboardButton("💸 انتقال وجه", callback_data="transfer")],
-        # [InlineKeyboardButton("🏦 وام", callback_data="loan")],  # وام غیرفعال شد
         [InlineKeyboardButton("📜 تراکنش‌های من", callback_data="my_transactions")],
         [InlineKeyboardButton("👤 اطلاعات حساب", callback_data="my_info")],
         [InlineKeyboardButton("📬 صندوق پیام", callback_data="notifications")],
@@ -89,12 +91,14 @@ def main_menu_keyboard(user_role: str = 'citizen'):
         keyboard.append([InlineKeyboardButton("👑 پنل مدیریت", callback_data="panel")])
     return InlineKeyboardMarkup(keyboard)
 
+# ---------- شروع و لغو ----------
 async def start(update: Update, context):
     user_id = update.effective_user.id
     username = update.effective_user.username or "بدون یوزرنیم"
     user = get_user_by_telegram_id(user_id)
 
     if not user:
+        context.user_data.clear()
         context.user_data['register_step'] = NAME_REAL
         context.user_data['username'] = username
         await update.message.reply_text(
@@ -131,6 +135,7 @@ async def cancel(update: Update, context):
         await update.message.reply_text("❌ عملیات لغو شد.\nبرای شروع مجدد /start بزنید.")
     return ConversationHandler.END
 
+# ---------- بخش‌های عادی ----------
 async def balance_callback(update: Update, context):
     query = update.callback_query
     await query.answer()
@@ -509,9 +514,8 @@ async def transfer_password_handler(update: Update, context):
     context.user_data.pop('transfer_step', None)
     return ConversationHandler.END
 
-# ---------- وام (غیرفعال) ----------
+# ---------- بخش وام (غیرفعال) ----------
 async def loan_disabled_handler(update: Update, context):
-    """هندلر موقت برای زمانی که کاربر به بخش وام دسترسی پیدا کند"""
     query = update.callback_query
     await query.answer()
     await query.edit_message_text(
@@ -522,6 +526,122 @@ async def loan_disabled_handler(update: Update, context):
         parse_mode='Markdown'
     )
 
+# ---------- بخش تراکنش‌های من ----------
+async def my_transactions_menu(update: Update, context):
+    """نمایش منوی تراکنش‌ها"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        await query.edit_message_text("❌ حساب ندارید. لطفاً /start بزنید.")
+        return
+    
+    acc = get_account_by_user_id(user['id'])
+    if not acc:
+        await query.edit_message_text("❌ حساب بانکی یافت نشد.")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("📋 همه تراکنش‌ها", callback_data="trans_all")],
+        [InlineKeyboardButton("💸 انتقال وجه", callback_data="trans_transfer")],
+        [InlineKeyboardButton("🏦 وام", callback_data="trans_loan")],
+        [InlineKeyboardButton("💰 پرداخت قسط", callback_data="trans_loan_payment")],
+        [InlineKeyboardButton("📥 واریز/برداشت", callback_data="trans_manual")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]
+    ]
+    await query.edit_message_text(
+        "📊 **تراکنش‌های من**\n\n"
+        "لطفاً نوع تراکنش‌هایی که می‌خواهید مشاهده کنید را انتخاب کنید:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def show_transactions(update: Update, context, tx_type=None, page=0):
+    """نمایش لیست تراکنش‌ها با صفحه‌بندی"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        await query.edit_message_text("❌ حساب ندارید.")
+        return
+    
+    acc = get_account_by_user_id(user['id'])
+    if not acc:
+        await query.edit_message_text("❌ حساب بانکی یافت نشد.")
+        return
+    
+    offset = page * TRANSACTIONS_PER_PAGE
+    
+    if tx_type == 'all':
+        tx_type = None
+    
+    transactions, total = get_user_transactions(user['id'], TRANSACTIONS_PER_PAGE, offset, tx_type)
+    
+    if not transactions:
+        await query.edit_message_text(
+            "📭 شما هیچ تراکنشی در این دسته ندارید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="my_transactions")]])
+        )
+        return
+    
+    text = f"📊 **لیست تراکنش‌ها** (صفحه {page+1})\n━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    for tx in transactions:
+        text += format_transaction_summary(tx) + "\n━━━━━━━━━━━━━━━━━━━\n"
+    
+    total_pages = (total + TRANSACTIONS_PER_PAGE - 1) // TRANSACTIONS_PER_PAGE
+    
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"trans_page_{tx_type or 'all'}_{page-1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("➡️ بعدی", callback_data=f"trans_page_{tx_type or 'all'}_{page+1}"))
+    
+    keyboard = []
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به فیلتر", callback_data="my_transactions")])
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def transaction_type_handler(update: Update, context):
+    """هندلر انتخاب نوع تراکنش"""
+    query = update.callback_query
+    data = query.data
+    tx_type = data.replace('trans_', '')
+    if tx_type == 'all':
+        tx_type = None
+    context.user_data['trans_type'] = tx_type or 'all'
+    context.user_data['trans_page'] = 0
+    await show_transactions(update, context, tx_type, 0)
+
+async def transactions_page_handler(update: Update, context):
+    """هندلر صفحه‌بندی تراکنش‌ها"""
+    query = update.callback_query
+    data = query.data
+    parts = data.split('_')
+    tx_type = parts[2] if parts[2] != 'all' else None
+    page = int(parts[3])
+    context.user_data['trans_page'] = page
+    context.user_data['trans_type'] = tx_type or 'all'
+    await show_transactions(update, context, tx_type, page)
+
+async def back_to_transactions(update: Update, context):
+    """برگشت به لیست تراکنش‌ها"""
+    query = update.callback_query
+    await query.answer()
+    page = context.user_data.get('trans_page', 0)
+    tx_type = context.user_data.get('trans_type', 'all')
+    await show_transactions(update, context, tx_type, page)
+
+# ---------- placeholder ----------
 async def placeholder_handler(update: Update, context):
     query = update.callback_query
     await query.answer()
@@ -530,6 +650,7 @@ async def placeholder_handler(update: Update, context):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]])
     )
 
+# ---------- main ----------
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
@@ -572,14 +693,20 @@ def main():
     app.add_handler(CallbackQueryHandler(back_to_panel, pattern="^back_to_panel$"))
     app.add_handler(CallbackQueryHandler(refresh_role, pattern="^refresh_role$"))
     
-    # وام غیرفعال (در صورت فراخوانی مستقیم)
+    # تراکنش‌های من
+    app.add_handler(CallbackQueryHandler(my_transactions_menu, pattern="^my_transactions$"))
+    app.add_handler(CallbackQueryHandler(transaction_type_handler, pattern="^trans_"))
+    app.add_handler(CallbackQueryHandler(transactions_page_handler, pattern="^trans_page_"))
+    app.add_handler(CallbackQueryHandler(back_to_transactions, pattern="^back_to_transactions$"))
+    
+    # وام غیرفعال
     app.add_handler(CallbackQueryHandler(loan_disabled_handler, pattern="^loan$"))
     app.add_handler(CallbackQueryHandler(loan_disabled_handler, pattern="^loan_request$"))
     app.add_handler(CallbackQueryHandler(loan_disabled_handler, pattern="^loan_pay$"))
     app.add_handler(CallbackQueryHandler(loan_disabled_handler, pattern="^loan_status$"))
     
-    # placeholder برای بخش‌های ناقص دیگر
-    for p in ["my_transactions","notifications","settings","change_account","support",
+    # placeholder برای بخش‌های ناقص
+    for p in ["notifications","settings","change_account","support",
               "admin_users","admin_finance","admin_treasury","admin_requests"]:
         app.add_handler(CallbackQueryHandler(placeholder_handler, pattern=f"^{p}$"))
     
