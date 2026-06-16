@@ -208,8 +208,8 @@ def check_and_block_low_credit(account_id):
     return False
 
 # ---------- توابع تراکنش ----------
-def format_transaction_summary(tx):
-    """فرمت خلاصه تراکنش برای نمایش در لیست"""
+def format_transaction_summary(tx, user_account_number):
+    """فرمت خلاصه تراکنش با علامت مثبت/منفی و نمایش طرف مقابل"""
     types = {
         'transfer': '💸 انتقال وجه',
         'loan': '🏦 دریافت وام',
@@ -225,14 +225,30 @@ def format_transaction_summary(tx):
     jcreated = jdatetime.datetime.fromgregorian(datetime=created)
     date_str = jcreated.strftime('%Y/%m/%d')
     
-    # تشخیص جهت مبلغ
-    if tx['sender_account'] == tx['receiver_account']:
-        amount_str = f"{tx['amount']} ART"
+    # تشخیص جهت تراکنش
+    if tx['sender_account'] == user_account_number:
+        # پرداخت (پول از حساب من خارج شده)
+        sign = '-'
+        amount_display = f"{sign}{tx['amount']} ART"
+        # طرف مقابل: گیرنده
+        receiver = get_user_by_account_number(tx['receiver_account'])
+        opposite_name = receiver['camelot_name'] if receiver else 'نامشخص'
+        opposite_info = f"به {opposite_name} (حساب {tx['receiver_account']})"
+    elif tx['receiver_account'] == user_account_number:
+        # دریافت (پول به حساب من واریز شده)
+        sign = '+'
+        amount_display = f"{sign}{tx['amount']} ART"
+        # طرف مقابل: فرستنده
+        sender = get_user_by_account_number(tx['sender_account'])
+        opposite_name = sender['camelot_name'] if sender else 'نامشخص'
+        opposite_info = f"از {opposite_name} (حساب {tx['sender_account']})"
     else:
-        # اینجا برای نمایش ساده، فقط مبلغ رو نشون میدیم (در نسخه بعدی دقیقتر میشه)
-        amount_str = f"{tx['amount']} ART"
+        # تراکنش‌های داخلی (مثلاً وام) که هر دو حساب متعلق به کاربر است
+        sign = ''
+        amount_display = f"{tx['amount']} ART"
+        opposite_info = 'داخلی'
     
-    return f"📌 {tx_type}\n   💰 {amount_str}   🕐 {date_str}"
+    return f"📌 {tx_type}\n   💰 {amount_display}   🕐 {date_str}\n   {opposite_info}"
 
 def format_transaction_detail(tx, user_account):
     """فرمت جزئیات کامل یک تراکنش"""
