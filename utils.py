@@ -1,4 +1,4 @@
-from database import get_db, log_audit
+from database import get_db, log_audit, get_user_by_account_number
 from datetime import datetime
 import pytz
 import jdatetime
@@ -207,7 +207,7 @@ def check_and_block_low_credit(account_id):
     conn.close()
     return False
 
-# ---------- توابع تراکنش ----------
+# ---------- توابع تراکنش (نسخه جدید با علامت +/- و طرف مقابل) ----------
 def format_transaction_summary(tx, user_account_number):
     """فرمت خلاصه تراکنش با علامت مثبت/منفی و نمایش طرف مقابل"""
     types = {
@@ -243,7 +243,7 @@ def format_transaction_summary(tx, user_account_number):
         opposite_name = sender['camelot_name'] if sender else 'نامشخص'
         opposite_info = f"از {opposite_name} (حساب {tx['sender_account']})"
     else:
-        # تراکنش‌های داخلی (مثلاً وام) که هر دو حساب متعلق به کاربر است
+        # تراکنش‌های داخلی
         sign = ''
         amount_display = f"{tx['amount']} ART"
         opposite_info = 'داخلی'
