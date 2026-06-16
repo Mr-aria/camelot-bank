@@ -526,9 +526,9 @@ async def loan_disabled_handler(update: Update, context):
         parse_mode='Markdown'
     )
 
-# ---------- بخش تراکنش‌های من ----------
+# ---------- بخش تراکنش‌های من (نسخه جدید بدون فیلتر) ----------
 async def my_transactions_menu(update: Update, context):
-    """نمایش منوی تراکنش‌ها"""
+    """نمایش مستقیم لیست تراکنش‌ها (بدون فیلتر)"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -542,23 +542,12 @@ async def my_transactions_menu(update: Update, context):
         await query.edit_message_text("❌ حساب بانکی یافت نشد.")
         return
     
-    keyboard = [
-        [InlineKeyboardButton("📋 همه تراکنش‌ها", callback_data="trans_all")],
-        [InlineKeyboardButton("💸 انتقال وجه", callback_data="trans_transfer")],
-        [InlineKeyboardButton("🏦 وام", callback_data="trans_loan")],
-        [InlineKeyboardButton("💰 پرداخت قسط", callback_data="trans_loan_payment")],
-        [InlineKeyboardButton("📥 واریز/برداشت", callback_data="trans_manual")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]
-    ]
-    await query.edit_message_text(
-        "📊 **تراکنش‌های من**\n\n"
-        "لطفاً نوع تراکنش‌هایی که می‌خواهید مشاهده کنید را انتخاب کنید:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
+    context.user_data['trans_type'] = 'all'
+    context.user_data['trans_page'] = 0
+    await show_transactions(update, context, tx_type=None, page=0)
 
 async def show_transactions(update: Update, context, tx_type=None, page=0):
-    """نمایش لیست تراکنش‌ها با صفحه‌بندی"""
+    """نمایش لیست تراکنش‌ها با صفحه‌بندی و علامت +/- و طرف مقابل"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -573,37 +562,32 @@ async def show_transactions(update: Update, context, tx_type=None, page=0):
         return
     
     offset = page * TRANSACTIONS_PER_PAGE
-    
-    if tx_type == 'all':
-        tx_type = None
-    
     transactions, total = get_user_transactions(user['id'], TRANSACTIONS_PER_PAGE, offset, tx_type)
     
     if not transactions:
         await query.edit_message_text(
-            "📭 شما هیچ تراکنشی در این دسته ندارید.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="my_transactions")]])
+            "📭 شما هیچ تراکنشی ندارید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]])
         )
         return
     
     text = f"📊 **لیست تراکنش‌ها** (صفحه {page+1})\n━━━━━━━━━━━━━━━━━━━\n\n"
     
     for tx in transactions:
-        text += format_transaction_summary(tx) + "\n━━━━━━━━━━━━━━━━━━━\n"
+        text += format_transaction_summary(tx, acc['account_number']) + "\n━━━━━━━━━━━━━━━━━━━\n"
     
     total_pages = (total + TRANSACTIONS_PER_PAGE - 1) // TRANSACTIONS_PER_PAGE
     
     nav_buttons = []
     if page > 0:
-        nav_buttons.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"trans_page_{tx_type or 'all'}_{page-1}"))
+        nav_buttons.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"trans_page_{page-1}"))
     if page < total_pages - 1:
-        nav_buttons.append(InlineKeyboardButton("➡️ بعدی", callback_data=f"trans_page_{tx_type or 'all'}_{page+1}"))
+        nav_buttons.append(InlineKeyboardButton("➡️ بعدی", callback_data=f"trans_page_{page+1}"))
     
     keyboard = []
     if nav_buttons:
         keyboard.append(nav_buttons)
-    
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت به فیلتر", callback_data="my_transactions")])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_menu")])
     
     await query.edit_message_text(
         text,
@@ -611,35 +595,14 @@ async def show_transactions(update: Update, context, tx_type=None, page=0):
         parse_mode='Markdown'
     )
 
-async def transaction_type_handler(update: Update, context):
-    """هندلر انتخاب نوع تراکنش"""
-    query = update.callback_query
-    data = query.data
-    tx_type = data.replace('trans_', '')
-    if tx_type == 'all':
-        tx_type = None
-    context.user_data['trans_type'] = tx_type or 'all'
-    context.user_data['trans_page'] = 0
-    await show_transactions(update, context, tx_type, 0)
-
 async def transactions_page_handler(update: Update, context):
     """هندلر صفحه‌بندی تراکنش‌ها"""
     query = update.callback_query
     data = query.data
     parts = data.split('_')
-    tx_type = parts[2] if parts[2] != 'all' else None
-    page = int(parts[3])
+    page = int(parts[2])  # trans_page_{page}
     context.user_data['trans_page'] = page
-    context.user_data['trans_type'] = tx_type or 'all'
-    await show_transactions(update, context, tx_type, page)
-
-async def back_to_transactions(update: Update, context):
-    """برگشت به لیست تراکنش‌ها"""
-    query = update.callback_query
-    await query.answer()
-    page = context.user_data.get('trans_page', 0)
-    tx_type = context.user_data.get('trans_type', 'all')
-    await show_transactions(update, context, tx_type, page)
+    await show_transactions(update, context, tx_type=None, page=page)
 
 # ---------- placeholder ----------
 async def placeholder_handler(update: Update, context):
@@ -693,11 +656,9 @@ def main():
     app.add_handler(CallbackQueryHandler(back_to_panel, pattern="^back_to_panel$"))
     app.add_handler(CallbackQueryHandler(refresh_role, pattern="^refresh_role$"))
     
-    # تراکنش‌های من
+    # تراکنش‌های من (نسخه جدید بدون فیلتر)
     app.add_handler(CallbackQueryHandler(my_transactions_menu, pattern="^my_transactions$"))
-    app.add_handler(CallbackQueryHandler(transaction_type_handler, pattern="^trans_"))
     app.add_handler(CallbackQueryHandler(transactions_page_handler, pattern="^trans_page_"))
-    app.add_handler(CallbackQueryHandler(back_to_transactions, pattern="^back_to_transactions$"))
     
     # وام غیرفعال
     app.add_handler(CallbackQueryHandler(loan_disabled_handler, pattern="^loan$"))
