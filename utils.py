@@ -1,12 +1,11 @@
 from database import get_db, log_audit
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 import jdatetime
 
 TEHRAN_TZ = pytz.timezone('Asia/Tehran')
 
 def create_bank_account(user_id, username, real_name, camelot_name, national_id, password):
-    """ایجاد حساب بانکی جدید با username (برای ذخیره در دیتابیس)"""
     from database import generate_account_number, get_setting
     
     conn = get_db()
@@ -100,11 +99,9 @@ def update_credit_score(account_id, new_score, reason):
 
 # ---------- توابع وام ----------
 def get_avg_monthly_turnover(account_number):
-    """محاسبه میانگین گردش ماهانه (مبلغ تراکنش‌های خروجی) - در صورت نداشتن تراکنش، حداقل 0 برمی‌گرداند"""
     from database import get_db
     conn = get_db()
     c = conn.cursor()
-    # میانگین ۳ ماه اخیر
     c.execute('''
         SELECT AVG(amount) as avg_monthly FROM (
             SELECT SUM(amount) as amount 
@@ -121,7 +118,6 @@ def get_avg_monthly_turnover(account_number):
     return 0
 
 def calculate_max_loan_amount(user_id):
-    """محاسبه حداکثر مبلغ وام مجاز برای کاربر"""
     from database import get_db, get_account_by_user_id, get_user_by_telegram_id, get_loan_setting
     multiplier = int(get_loan_setting('loan_max_multiplier_turnover') or 3)
     divider = int(get_loan_setting('loan_credit_score_divider') or 10)
@@ -157,12 +153,10 @@ def has_active_loan(account_id):
     return row is not None
 
 def calculate_installments(amount, interest_rate, installments_count):
-    """محاسبه مبلغ هر قسط با احتساب سود"""
     total_with_interest = amount + (amount * interest_rate / 100)
     return total_with_interest / installments_count
 
 def get_loan_status_text(loan):
-    """دریافت وضعیت نمایشی وام"""
     if loan['status'] == 'active':
         return "✅ فعال"
     elif loan['status'] == 'delayed':
@@ -173,7 +167,6 @@ def get_loan_status_text(loan):
         return "❌ نامشخص"
 
 def format_loan_info(loan, account):
-    """فرمت اطلاعات وام برای نمایش"""
     from database import get_db
     conn = get_db()
     c = conn.cursor()
@@ -199,7 +192,6 @@ def format_loan_info(loan, account):
     return text
 
 def check_and_block_low_credit(account_id):
-    """بررسی و بلوکه کردن حساب در صورت پایین بودن امتیاز اعتباری"""
     from database import get_db, get_loan_setting
     min_score = int(get_loan_setting('loan_min_credit_score_to_unblock') or 300)
     
@@ -214,3 +206,69 @@ def check_and_block_low_credit(account_id):
         return True
     conn.close()
     return False
+
+# ---------- توابع تراکنش ----------
+def format_transaction_summary(tx):
+    """فرمت خلاصه تراکنش برای نمایش در لیست"""
+    types = {
+        'transfer': '💸 انتقال وجه',
+        'loan': '🏦 دریافت وام',
+        'loan_payment': '💰 پرداخت قسط',
+        'manual_deposit': '📥 واریز دستی',
+        'manual_withdraw': '📤 برداشت دستی',
+        'tax': '🏛 مالیات',
+        'treasury': '🏦 خزانه'
+    }
+    tx_type = types.get(tx['type'], tx['type'])
+    
+    created = datetime.strptime(tx['created_at'], '%Y-%m-%d %H:%M:%S')
+    jcreated = jdatetime.datetime.fromgregorian(datetime=created)
+    date_str = jcreated.strftime('%Y/%m/%d')
+    
+    # تشخیص جهت مبلغ
+    if tx['sender_account'] == tx['receiver_account']:
+        amount_str = f"{tx['amount']} ART"
+    else:
+        # اینجا برای نمایش ساده، فقط مبلغ رو نشون میدیم (در نسخه بعدی دقیقتر میشه)
+        amount_str = f"{tx['amount']} ART"
+    
+    return f"📌 {tx_type}\n   💰 {amount_str}   🕐 {date_str}"
+
+def format_transaction_detail(tx, user_account):
+    """فرمت جزئیات کامل یک تراکنش"""
+    types = {
+        'transfer': '💸 انتقال وجه',
+        'loan': '🏦 دریافت وام',
+        'loan_payment': '💰 پرداخت قسط',
+        'manual_deposit': '📥 واریز دستی',
+        'manual_withdraw': '📤 برداشت دستی',
+        'tax': '🏛 مالیات',
+        'treasury': '🏦 خزانه'
+    }
+    tx_type = types.get(tx['type'], tx['type'])
+    
+    created = datetime.strptime(tx['created_at'], '%Y-%m-%d %H:%M:%S')
+    jcreated = jdatetime.datetime.fromgregorian(datetime=created)
+    date_str = jcreated.strftime('%Y/%m/%d - %H:%M')
+    
+    status = "✅ موفق" if tx['status'] == 'success' else "❌ لغو شده"
+    
+    detail = f"""📋 **جزئیات تراکنش**
+━━━━━━━━━━━━━━━━━━━
+🔖 شماره: `{tx['txid']}`
+📌 نوع: {tx_type}
+💰 مبلغ: {tx['amount']} ART
+💸 کارمزد: {tx['fee']} ART
+🕐 تاریخ: {date_str}
+📊 وضعیت: {status}"""
+
+    if tx['reason']:
+        detail += f"\n📝 علت: {tx['reason']}"
+    
+    if tx['sender_account']:
+        detail += f"\n🏦 حساب مبدأ: `{tx['sender_account']}`"
+    if tx['receiver_account']:
+        detail += f"\n🏦 حساب مقصد: `{tx['receiver_account']}`"
+    
+    detail += "\n━━━━━━━━━━━━━━━━━━━"
+    return detail
