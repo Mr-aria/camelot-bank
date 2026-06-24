@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timedelta
 import pytz
 import jdatetime
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ConversationHandler
 import os
@@ -15,7 +16,8 @@ EMPLOYEES_IDS = []
 from database import (
     init_db, get_db, get_user_by_telegram_id, get_account_by_user_id,
     get_account_by_number, get_user_by_account_number, get_setting,
-    generate_txid, log_audit, get_user_transactions, get_transaction_details
+    generate_txid, log_audit, get_user_transactions, get_transaction_details,
+    send_notification
 )
 from utils import (
     create_bank_account, format_balance, format_receipt,
@@ -31,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 NAME_REAL, NAME_CAMELOT, NATIONAL_ID, PASSWORD, CONFIRM = range(5)
 TRANSFER_ACCOUNT, TRANSFER_AMOUNT, TRANSFER_REASON, TRANSFER_PASSWORD = range(10, 14)
+BROADCAST_MESSAGE, BROADCAST_CONFIRM = range(30, 32)
 
 # ---------- توابع کمکی ----------
 def get_user_role_from_telegram_id(telegram_id):
@@ -260,6 +263,7 @@ async def panel_callback(update: Update, context):
         [InlineKeyboardButton("💰 مدیریت مالی", callback_data="admin_finance")],
         [InlineKeyboardButton("🏦 مدیریت خزانه", callback_data="admin_treasury")],
         [InlineKeyboardButton("📨 درخواست‌های pending", callback_data="admin_requests")],
+        [InlineKeyboardButton("📣 ارسال پیام همگانی", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]
     ]
     await query.edit_message_text(panel_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -526,7 +530,7 @@ async def loan_disabled_handler(update: Update, context):
         parse_mode='Markdown'
     )
 
-# ---------- بخش تراکنش‌های من (نسخه جدید بدون فیلتر) ----------
+# ---------- بخش تراکنش‌های من ----------
 async def my_transactions_menu(update: Update, context):
     """نمایش مستقیم لیست تراکنش‌ها (بدون فیلتر)"""
     query = update.callback_query
@@ -604,6 +608,190 @@ async def transactions_page_handler(update: Update, context):
     context.user_data['trans_page'] = page
     await show_transactions(update, context, tx_type=None, page=page)
 
+# ---------- ارسال پیام همگانی (فقط مدیران) ----------
+async def admin_broadcast_start(update: Update, context):
+    """شروع فرآیند ارسال پیام همگانی"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    await query.edit_message_text(
+        "📣 **ارسال پیام همگانی**\n\n"
+        "لطفاً متن پیام خود را وارد کنید:\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return BROADCAST_MESSAGE
+
+async def admin_broadcast_receive(update: Update, context):
+    """دریافت متن پیام از مدیر"""
+    text = update.message.text
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ ارسال پیام لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(update.effective_user.id)))
+        return ConversationHandler.END
+    
+    context.user_data['broadcast_text'] = text
+    context.user_data['broadcast_step'] = BROADCAST_CONFIRM
+    
+    # دریافت تعداد کاربران
+    db = get_db()
+    c = db.cursor()
+    c.execute('SELECT COUNT(DISTINCT user_id) FROM accounts')
+    count = c.fetchone()[0]
+    db.close()
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ بله، ارسال کن", callback_data="broadcast_yes")],
+        [InlineKeyboardButton("❌ لغو", callback_data="broadcast_no")]
+    ])
+    
+    await update.message.reply_text(
+        f"📣 **تأیید ارسال پیام همگانی**\n\n"
+        f"📝 متن پیام:\n```\n{text}\n```\n\n"
+        f"👥 تعداد گیرندگان: {count} کاربر\n\n"
+        f"آیا از ارسال این پیام مطمئن هستید؟",
+        reply_markup=keyboard,
+        parse_mode='Markdown'
+    )
+    return BROADCAST_CONFIRM
+
+async def admin_broadcast_confirm(update: Update, context):
+    """تأیید نهایی و ارسال پیام"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    if query.data == "broadcast_yes":
+        text = context.user_data.get('broadcast_text')
+        if not text:
+            await query.edit_message_text("❌ خطا: متن پیام یافت نشد.")
+            return ConversationHandler.END
+        
+        # دریافت همه کاربران دارای حساب
+        db = get_db()
+        c = db.cursor()
+        c.execute('SELECT DISTINCT user_id FROM accounts')
+        users = c.fetchall()
+        db.close()
+        
+        if not users:
+            await query.edit_message_text("❌ هیچ کاربری برای ارسال پیام وجود ندارد.")
+            return ConversationHandler.END
+        
+        # ارسال پیام اولیه (در حال ارسال)
+        await query.edit_message_text(
+            f"📣 در حال ارسال پیام به {len(users)} کاربر...\nلطفاً صبر کنید.",
+            parse_mode='Markdown'
+        )
+        
+        success_count = 0
+        fail_count = 0
+        
+        for u in users:
+            try:
+                # ارسال پیام فوری
+                await context.bot.send_message(
+                    u['user_id'],
+                    f"📣 **پیام همگانی بانک کملوت**\n\n{text}",
+                    parse_mode='Markdown'
+                )
+                # ذخیره در صندوق پیام
+                send_notification(u['user_id'], 'پیام همگانی', text)
+                success_count += 1
+            except Exception as e:
+                logger.error(f"خطا در ارسال به {u['user_id']}: {e}")
+                fail_count += 1
+            
+            # تاخیر کوچک برای جلوگیری از محدودیت نرخ
+            await asyncio.sleep(0.05)
+        
+        # لاگ در کانال
+        await log_to_channel(
+            context,
+            f"📣 **پیام همگانی ارسال شد**\n"
+            f"تعداد موفق: {success_count}\n"
+            f"تعداد ناموفق: {fail_count}\n"
+            f"ارسال‌کننده: {get_user_role_display(user_id)}"
+        )
+        
+        await query.edit_message_text(
+            f"✅ **پیام همگانی با موفقیت ارسال شد!**\n\n"
+            f"✅ موفق: {success_count}\n"
+            f"❌ ناموفق: {fail_count}",
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id))
+        )
+        
+    else:  # broadcast_no
+        await query.edit_message_text(
+            "❌ ارسال پیام لغو شد.",
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id))
+        )
+    
+    # پاک کردن اطلاعات موقت
+    context.user_data.pop('broadcast_text', None)
+    context.user_data.pop('broadcast_step', None)
+    return ConversationHandler.END
+
+# ---------- صندوق پیام برای کاربران عادی ----------
+async def notifications_menu(update: Update, context):
+    """نمایش صندوق پیام کاربر"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        await query.edit_message_text("❌ حساب ندارید.")
+        return
+    
+    db = get_db()
+    c = db.cursor()
+    c.execute('''
+        SELECT * FROM notifications 
+        WHERE user_id = ? 
+        ORDER BY created_at DESC 
+        LIMIT 20
+    ''', (user['id'],))
+    notifications = c.fetchall()
+    db.close()
+    
+    if not notifications:
+        await query.edit_message_text(
+            "📭 **صندوق پیام شما خالی است.**",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]]),
+            parse_mode='Markdown'
+        )
+        return
+    
+    text = "📬 **صندوق پیام شما**\n━━━━━━━━━━━━━━━━━━━\n\n"
+    for n in notifications:
+        created = datetime.strptime(n['created_at'], '%Y-%m-%d %H:%M:%S')
+        jcreated = jdatetime.datetime.fromgregorian(datetime=created)
+        date_str = jcreated.strftime('%Y/%m/%d - %H:%M')
+        
+        status_icon = "✅" if n['is_read'] else "🔵"
+        text += f"{status_icon} **{n['title']}**\n"
+        text += f"📝 {n['message']}\n"
+        text += f"🕐 {date_str}\n━━━━━━━━━━━━━━━━━━━\n"
+        
+        # علامت‌گذاری به عنوان خوانده شده
+        if not n['is_read']:
+            db2 = get_db()
+            c2 = db2.cursor()
+            c2.execute('UPDATE notifications SET is_read = 1 WHERE id = ?', (n['id'],))
+            db2.commit()
+            db2.close()
+    
+    keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]]
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
 # ---------- placeholder ----------
 async def placeholder_handler(update: Update, context):
     query = update.callback_query
@@ -643,6 +831,17 @@ def main():
         fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
     ))
     
+    # ارسال پیام همگانی
+    broadcast_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_broadcast_start, pattern="^admin_broadcast$")],
+        states={
+            BROADCAST_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_receive)],
+            BROADCAST_CONFIRM: [CallbackQueryHandler(admin_broadcast_confirm)],
+        },
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(broadcast_conv)
+    
     # دستورات اصلی
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel))
@@ -656,9 +855,12 @@ def main():
     app.add_handler(CallbackQueryHandler(back_to_panel, pattern="^back_to_panel$"))
     app.add_handler(CallbackQueryHandler(refresh_role, pattern="^refresh_role$"))
     
-    # تراکنش‌های من (نسخه جدید بدون فیلتر)
+    # تراکنش‌های من
     app.add_handler(CallbackQueryHandler(my_transactions_menu, pattern="^my_transactions$"))
     app.add_handler(CallbackQueryHandler(transactions_page_handler, pattern="^trans_page_"))
+    
+    # صندوق پیام
+    app.add_handler(CallbackQueryHandler(notifications_menu, pattern="^notifications$"))
     
     # وام غیرفعال
     app.add_handler(CallbackQueryHandler(loan_disabled_handler, pattern="^loan$"))
@@ -667,7 +869,7 @@ def main():
     app.add_handler(CallbackQueryHandler(loan_disabled_handler, pattern="^loan_status$"))
     
     # placeholder برای بخش‌های ناقص
-    for p in ["notifications","settings","change_account","support",
+    for p in ["settings","change_account","support",
               "admin_users","admin_finance","admin_treasury","admin_requests"]:
         app.add_handler(CallbackQueryHandler(placeholder_handler, pattern=f"^{p}$"))
     
