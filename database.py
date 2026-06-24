@@ -1,6 +1,6 @@
 import sqlite3
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import jdatetime
 
@@ -158,6 +158,18 @@ def init_db():
         credit_penalty INTEGER DEFAULT 0,
         status TEXT DEFAULT 'pending',
         FOREIGN KEY (loan_id) REFERENCES loans(id)
+    )''')
+    
+    # 14. support_tickets
+    c.execute('''CREATE TABLE IF NOT EXISTS support_tickets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        message TEXT,
+        reply TEXT,
+        status TEXT DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        replied_at TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
     )''')
     
     # تنظیمات پیش‌فرض عمومی
