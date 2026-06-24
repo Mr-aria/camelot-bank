@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 NAME_REAL, NAME_CAMELOT, NATIONAL_ID, PASSWORD, CONFIRM = range(5)
 TRANSFER_ACCOUNT, TRANSFER_AMOUNT, TRANSFER_REASON, TRANSFER_PASSWORD = range(10, 14)
 BROADCAST_MESSAGE, BROADCAST_CONFIRM = range(30, 32)
+SUPPORT_MESSAGE = 40
 
 # ---------- توابع کمکی ----------
 def get_user_role_from_telegram_id(telegram_id):
@@ -85,7 +86,6 @@ def main_menu_keyboard(user_role: str = 'citizen'):
         [InlineKeyboardButton("📜 تراکنش‌های من", callback_data="my_transactions")],
         [InlineKeyboardButton("👤 اطلاعات حساب", callback_data="my_info")],
         [InlineKeyboardButton("📬 صندوق پیام", callback_data="notifications")],
-        [InlineKeyboardButton("⚙️ تنظیمات", callback_data="settings")],
         [InlineKeyboardButton("🔄 تغییر شماره حساب", callback_data="change_account")],
         [InlineKeyboardButton("📈 اعتبار بانکی من", callback_data="my_credit")],
         [InlineKeyboardButton("🆘 پشتیبانی", callback_data="support")],
@@ -686,7 +686,6 @@ async def admin_broadcast_confirm(update: Update, context):
             await query.edit_message_text("❌ هیچ کاربری برای ارسال پیام وجود ندارد.")
             return ConversationHandler.END
         
-        # ارسال پیام اولیه (در حال ارسال)
         await query.edit_message_text(
             f"📣 در حال ارسال پیام به {len(users)} کاربر...\nلطفاً صبر کنید.",
             parse_mode='Markdown'
@@ -697,23 +696,19 @@ async def admin_broadcast_confirm(update: Update, context):
         
         for u in users:
             try:
-                # ارسال پیام فوری به telegram_id
                 await context.bot.send_message(
                     u['telegram_id'],
                     f"📣 **پیام همگانی بانک کملوت**\n\n{text}",
                     parse_mode='Markdown'
                 )
-                # ذخیره در صندوق پیام با user_id (id داخلی دیتابیس)
                 send_notification(u['user_id'], 'پیام همگانی', text)
                 success_count += 1
             except Exception as e:
                 logger.error(f"خطا در ارسال به {u['telegram_id']}: {e}")
                 fail_count += 1
             
-            # تاخیر کوچک برای جلوگیری از محدودیت نرخ
             await asyncio.sleep(0.05)
         
-        # لاگ در کانال
         await log_to_channel(
             context,
             f"📣 **پیام همگانی ارسال شد**\n"
@@ -735,9 +730,92 @@ async def admin_broadcast_confirm(update: Update, context):
             reply_markup=main_menu_keyboard(get_user_role_display(user_id))
         )
     
-    # پاک کردن اطلاعات موقت
     context.user_data.pop('broadcast_text', None)
     context.user_data.pop('broadcast_step', None)
+    return ConversationHandler.END
+
+# ---------- پشتیبانی ----------
+async def support_start(update: Update, context):
+    """ورود به بخش پشتیبانی"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        await query.edit_message_text("❌ حساب ندارید. لطفاً /start بزنید.")
+        return
+    
+    await query.edit_message_text(
+        "🆘 **پشتیبانی بانک کملوت**\n\n"
+        "لطفاً پیام خود را بنویسید.\n"
+        "پیام شما مستقیماً برای مدیریت ارسال می‌شود.\n\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return SUPPORT_MESSAGE
+
+async def support_receive(update: Update, context):
+    """دریافت پیام پشتیبانی از کاربر و ارسال به مالک و شاه"""
+    text = update.message.text
+    user_id = update.effective_user.id
+    user = get_user_by_telegram_id(user_id)
+    
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ ارسال پیام پشتیبانی لغو شد.", reply_markup=main_menu_keyboard(user['role'] if user else 'citizen'))
+        return ConversationHandler.END
+    
+    if not user:
+        await update.message.reply_text("❌ شما حساب ندارید. لطفاً /start کنید.")
+        return ConversationHandler.END
+    
+    # دریافت اطلاعات کاربر
+    acc = get_account_by_user_id(user['id'])
+    account_number = acc['account_number'] if acc else 'ندارد'
+    
+    # ساخت پیام برای ارسال به مدیران
+    admin_message = f"""🆘 **پیام جدید پشتیبانی**
+
+👤 کاربر: {user['real_name']} ({user['camelot_name']})
+🆔 کد ملی: {user['national_id']}
+🏦 شماره حساب: {account_number}
+📱 آیدی تلگرام: {user['telegram_id']}
+
+📝 **متن پیام:**
+{text}
+
+🕐 زمان: {get_jalali_date()}
+"""
+    
+    # ارسال به مالک و شاه
+    sent_to = []
+    for admin_id in [OWNER_ID, KING_ID]:
+        try:
+            await context.bot.send_message(admin_id, admin_message, parse_mode='Markdown')
+            sent_to.append(admin_id)
+        except Exception as e:
+            logger.error(f"خطا در ارسال پیام پشتیبانی به {admin_id}: {e}")
+    
+    if sent_to:
+        await update.message.reply_text(
+            "✅ **پیام شما با موفقیت ارسال شد.**\n\n"
+            "کارشناسان ما در اسرع وقت با شما تماس خواهند گرفت.",
+            reply_markup=main_menu_keyboard(user['role']),
+            parse_mode='Markdown'
+        )
+        
+        # لاگ در کانال
+        await log_to_channel(
+            context,
+            f"🆘 **درخواست پشتیبانی جدید**\n"
+            f"از: {user['camelot_name']} ({user['telegram_id']})"
+        )
+    else:
+        await update.message.reply_text(
+            "❌ متأسفانه ارسال پیام با مشکل مواجه شد.\n"
+            "لطفاً بعداً دوباره تلاش کنید.",
+            reply_markup=main_menu_keyboard(user['role'])
+        )
+    
     return ConversationHandler.END
 
 # ---------- صندوق پیام برای کاربران عادی ----------
@@ -781,7 +859,6 @@ async def notifications_menu(update: Update, context):
         text += f"📝 {n['message']}\n"
         text += f"🕐 {date_str}\n━━━━━━━━━━━━━━━━━━━\n"
         
-        # علامت‌گذاری به عنوان خوانده شده
         if not n['is_read']:
             db2 = get_db()
             c2 = db2.cursor()
@@ -846,6 +923,16 @@ def main():
     )
     app.add_handler(broadcast_conv)
     
+    # پشتیبانی
+    support_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(support_start, pattern="^support$")],
+        states={
+            SUPPORT_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, support_receive)],
+        },
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(support_conv)
+    
     # دستورات اصلی
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel))
@@ -873,7 +960,7 @@ def main():
     app.add_handler(CallbackQueryHandler(loan_disabled_handler, pattern="^loan_status$"))
     
     # placeholder برای بخش‌های ناقص
-    for p in ["settings","change_account","support",
+    for p in ["change_account",
               "admin_users","admin_finance","admin_treasury","admin_requests"]:
         app.add_handler(CallbackQueryHandler(placeholder_handler, pattern=f"^{p}$"))
     
