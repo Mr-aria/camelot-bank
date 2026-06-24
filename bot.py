@@ -671,10 +671,14 @@ async def admin_broadcast_confirm(update: Update, context):
             await query.edit_message_text("❌ خطا: متن پیام یافت نشد.")
             return ConversationHandler.END
         
-        # دریافت همه کاربران دارای حساب
+        # دریافت همه کاربران دارای حساب (با telegram_id)
         db = get_db()
         c = db.cursor()
-        c.execute('SELECT DISTINCT user_id FROM accounts')
+        c.execute('''
+            SELECT DISTINCT users.id as user_id, users.telegram_id 
+            FROM accounts 
+            JOIN users ON accounts.user_id = users.id
+        ''')
         users = c.fetchall()
         db.close()
         
@@ -693,17 +697,17 @@ async def admin_broadcast_confirm(update: Update, context):
         
         for u in users:
             try:
-                # ارسال پیام فوری
+                # ارسال پیام فوری به telegram_id
                 await context.bot.send_message(
-                    u['user_id'],
+                    u['telegram_id'],
                     f"📣 **پیام همگانی بانک کملوت**\n\n{text}",
                     parse_mode='Markdown'
                 )
-                # ذخیره در صندوق پیام
+                # ذخیره در صندوق پیام با user_id (id داخلی دیتابیس)
                 send_notification(u['user_id'], 'پیام همگانی', text)
                 success_count += 1
             except Exception as e:
-                logger.error(f"خطا در ارسال به {u['user_id']}: {e}")
+                logger.error(f"خطا در ارسال به {u['telegram_id']}: {e}")
                 fail_count += 1
             
             # تاخیر کوچک برای جلوگیری از محدودیت نرخ
