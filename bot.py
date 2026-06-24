@@ -35,6 +35,7 @@ NAME_REAL, NAME_CAMELOT, NATIONAL_ID, PASSWORD, CONFIRM = range(5)
 TRANSFER_ACCOUNT, TRANSFER_AMOUNT, TRANSFER_REASON, TRANSFER_PASSWORD = range(10, 14)
 BROADCAST_MESSAGE, BROADCAST_CONFIRM = range(30, 32)
 SUPPORT_MESSAGE = 40
+ADMIN_SUPPORT_REPLY = 50
 
 # ---------- توابع کمکی ----------
 def get_user_role_from_telegram_id(telegram_id):
@@ -264,6 +265,7 @@ async def panel_callback(update: Update, context):
         [InlineKeyboardButton("🏦 مدیریت خزانه", callback_data="admin_treasury")],
         [InlineKeyboardButton("📨 درخواست‌های pending", callback_data="admin_requests")],
         [InlineKeyboardButton("📣 ارسال پیام همگانی", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("📨 پیام‌های پشتیبانی", callback_data="admin_support")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]
     ]
     await query.edit_message_text(panel_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -532,7 +534,6 @@ async def loan_disabled_handler(update: Update, context):
 
 # ---------- بخش تراکنش‌های من ----------
 async def my_transactions_menu(update: Update, context):
-    """نمایش مستقیم لیست تراکنش‌ها (بدون فیلتر)"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -551,7 +552,6 @@ async def my_transactions_menu(update: Update, context):
     await show_transactions(update, context, tx_type=None, page=0)
 
 async def show_transactions(update: Update, context, tx_type=None, page=0):
-    """نمایش لیست تراکنش‌ها با صفحه‌بندی و علامت +/- و طرف مقابل"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -600,17 +600,15 @@ async def show_transactions(update: Update, context, tx_type=None, page=0):
     )
 
 async def transactions_page_handler(update: Update, context):
-    """هندلر صفحه‌بندی تراکنش‌ها"""
     query = update.callback_query
     data = query.data
     parts = data.split('_')
-    page = int(parts[2])  # trans_page_{page}
+    page = int(parts[2])
     context.user_data['trans_page'] = page
     await show_transactions(update, context, tx_type=None, page=page)
 
-# ---------- ارسال پیام همگانی (فقط مدیران) ----------
+# ---------- ارسال پیام همگانی ----------
 async def admin_broadcast_start(update: Update, context):
-    """شروع فرآیند ارسال پیام همگانی"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -628,7 +626,6 @@ async def admin_broadcast_start(update: Update, context):
     return BROADCAST_MESSAGE
 
 async def admin_broadcast_receive(update: Update, context):
-    """دریافت متن پیام از مدیر"""
     text = update.message.text
     if text.lower() == '/cancel':
         await update.message.reply_text("❌ ارسال پیام لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(update.effective_user.id)))
@@ -637,7 +634,6 @@ async def admin_broadcast_receive(update: Update, context):
     context.user_data['broadcast_text'] = text
     context.user_data['broadcast_step'] = BROADCAST_CONFIRM
     
-    # دریافت تعداد کاربران
     db = get_db()
     c = db.cursor()
     c.execute('SELECT COUNT(DISTINCT user_id) FROM accounts')
@@ -660,7 +656,6 @@ async def admin_broadcast_receive(update: Update, context):
     return BROADCAST_CONFIRM
 
 async def admin_broadcast_confirm(update: Update, context):
-    """تأیید نهایی و ارسال پیام"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -671,7 +666,6 @@ async def admin_broadcast_confirm(update: Update, context):
             await query.edit_message_text("❌ خطا: متن پیام یافت نشد.")
             return ConversationHandler.END
         
-        # دریافت همه کاربران دارای حساب (با telegram_id)
         db = get_db()
         c = db.cursor()
         c.execute('''
@@ -724,7 +718,7 @@ async def admin_broadcast_confirm(update: Update, context):
             reply_markup=main_menu_keyboard(get_user_role_display(user_id))
         )
         
-    else:  # broadcast_no
+    else:
         await query.edit_message_text(
             "❌ ارسال پیام لغو شد.",
             reply_markup=main_menu_keyboard(get_user_role_display(user_id))
@@ -734,9 +728,8 @@ async def admin_broadcast_confirm(update: Update, context):
     context.user_data.pop('broadcast_step', None)
     return ConversationHandler.END
 
-# ---------- پشتیبانی ----------
+# ---------- پشتیبانی (برای کاربران) ----------
 async def support_start(update: Update, context):
-    """ورود به بخش پشتیبانی"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -748,14 +741,12 @@ async def support_start(update: Update, context):
     await query.edit_message_text(
         "🆘 **پشتیبانی بانک کملوت**\n\n"
         "لطفاً پیام خود را بنویسید.\n"
-        "پیام شما مستقیماً برای مدیریت ارسال می‌شود.\n\n"
         "(برای لغو /cancel بزنید)",
         parse_mode='Markdown'
     )
     return SUPPORT_MESSAGE
 
 async def support_receive(update: Update, context):
-    """دریافت پیام پشتیبانی از کاربر و ارسال به مالک و شاه"""
     text = update.message.text
     user_id = update.effective_user.id
     user = get_user_by_telegram_id(user_id)
@@ -768,12 +759,22 @@ async def support_receive(update: Update, context):
         await update.message.reply_text("❌ شما حساب ندارید. لطفاً /start کنید.")
         return ConversationHandler.END
     
-    # دریافت اطلاعات کاربر
     acc = get_account_by_user_id(user['id'])
     account_number = acc['account_number'] if acc else 'ندارد'
     
-    # ساخت پیام برای ارسال به مدیران
-    admin_message = f"""🆘 **پیام جدید پشتیبانی**
+    # ذخیره در دیتابیس
+    db = get_db()
+    c = db.cursor()
+    c.execute('''
+        INSERT INTO support_tickets (user_id, message, status)
+        VALUES (?, ?, 'pending')
+    ''', (user['id'], text))
+    ticket_id = c.lastrowid
+    db.commit()
+    db.close()
+    
+    # ارسال به مالک (فقط یک بار)
+    admin_message = f"""🆘 **پیام جدید پشتیبانی** (تیکت #{ticket_id})
 
 👤 کاربر: {user['real_name']} ({user['camelot_name']})
 🆔 کد ملی: {user['national_id']}
@@ -786,41 +787,198 @@ async def support_receive(update: Update, context):
 🕐 زمان: {get_jalali_date()}
 """
     
-    # ارسال به مالک و شاه
-    sent_to = []
-    for admin_id in [OWNER_ID, KING_ID]:
-        try:
-            await context.bot.send_message(admin_id, admin_message, parse_mode='Markdown')
-            sent_to.append(admin_id)
-        except Exception as e:
-            logger.error(f"خطا در ارسال پیام پشتیبانی به {admin_id}: {e}")
+    try:
+        await context.bot.send_message(OWNER_ID, admin_message, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"خطا در ارسال پیام پشتیبانی به مالک: {e}")
     
-    if sent_to:
-        await update.message.reply_text(
-            "✅ **پیام شما با موفقیت ارسال شد.**\n\n"
-            "کارشناسان ما در اسرع وقت با شما تماس خواهند گرفت.",
-            reply_markup=main_menu_keyboard(user['role']),
-            parse_mode='Markdown'
-        )
-        
-        # لاگ در کانال
-        await log_to_channel(
-            context,
-            f"🆘 **درخواست پشتیبانی جدید**\n"
-            f"از: {user['camelot_name']} ({user['telegram_id']})"
-        )
-    else:
-        await update.message.reply_text(
-            "❌ متأسفانه ارسال پیام با مشکل مواجه شد.\n"
-            "لطفاً بعداً دوباره تلاش کنید.",
-            reply_markup=main_menu_keyboard(user['role'])
-        )
+    # پاسخ به کاربر
+    await update.message.reply_text(
+        "✅ پیام شما ارسال شد.",
+        reply_markup=main_menu_keyboard(user['role'])
+    )
+    
+    # لاگ در کانال
+    await log_to_channel(
+        context,
+        f"🆘 **درخواست پشتیبانی جدید** #{ticket_id}\n"
+        f"از: {user['camelot_name']} ({user['telegram_id']})"
+    )
     
     return ConversationHandler.END
 
-# ---------- صندوق پیام برای کاربران عادی ----------
+# ---------- مدیریت پشتیبانی (برای مدیران) ----------
+async def admin_support_list(update: Update, context):
+    """نمایش لیست تیکت‌های پشتیبانی"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    db = get_db()
+    c = db.cursor()
+    c.execute('''
+        SELECT st.*, u.camelot_name, u.real_name 
+        FROM support_tickets st
+        JOIN users u ON st.user_id = u.id
+        WHERE st.status = 'pending'
+        ORDER BY st.created_at DESC
+    ''')
+    tickets = c.fetchall()
+    db.close()
+    
+    if not tickets:
+        await query.edit_message_text(
+            "📭 **هیچ پیام پشتیبانی جدیدی وجود ندارد.**",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_panel")]])
+        )
+        return
+    
+    text = "📨 **لیست پیام‌های پشتیبانی (در انتظار پاسخ)**\n━━━━━━━━━━━━━━━━━━━\n\n"
+    keyboard = []
+    
+    for t in tickets:
+        created = datetime.strptime(t['created_at'], '%Y-%m-%d %H:%M:%S')
+        jcreated = jdatetime.datetime.fromgregorian(datetime=created)
+        date_str = jcreated.strftime('%Y/%m/%d %H:%M')
+        
+        text += f"🆔 #{t['id']} - {t['camelot_name']}\n"
+        text += f"📝 {t['message'][:50]}{'...' if len(t['message']) > 50 else ''}\n"
+        text += f"🕐 {date_str}\n━━━━━━━━━━━━━━━━━━━\n"
+        keyboard.append([InlineKeyboardButton(f"📩 پاسخ به #{t['id']}", callback_data=f"support_reply_{t['id']}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_panel")])
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def admin_support_reply_start(update: Update, context):
+    """شروع پاسخ به یک تیکت"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    ticket_id = int(query.data.split('_')[2])
+    context.user_data['support_ticket_id'] = ticket_id
+    
+    # دریافت اطلاعات تیکت
+    db = get_db()
+    c = db.cursor()
+    c.execute('''
+        SELECT st.*, u.camelot_name, u.real_name, u.telegram_id 
+        FROM support_tickets st
+        JOIN users u ON st.user_id = u.id
+        WHERE st.id = ?
+    ''', (ticket_id,))
+    ticket = c.fetchone()
+    db.close()
+    
+    if not ticket:
+        await query.edit_message_text("❌ تیکت یافت نشد.")
+        return
+    
+    created = datetime.strptime(ticket['created_at'], '%Y-%m-%d %H:%M:%S')
+    jcreated = jdatetime.datetime.fromgregorian(datetime=created)
+    date_str = jcreated.strftime('%Y/%m/%d - %H:%M')
+    
+    await query.edit_message_text(
+        f"📩 **پاسخ به تیکت #{ticket_id}**\n━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 کاربر: {ticket['camelot_name']} ({ticket['real_name']})\n"
+        f"🆔 آیدی تلگرام: {ticket['telegram_id']}\n"
+        f"🕐 زمان ارسال: {date_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📝 **پیام کاربر:**\n{ticket['message']}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"لطفاً پاسخ خود را وارد کنید:\n"
+        f"(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return ADMIN_SUPPORT_REPLY
+
+async def admin_support_reply_receive(update: Update, context):
+    """دریافت پاسخ از مدیر و ارسال به کاربر"""
+    text = update.message.text
+    user_id = update.effective_user.id
+    ticket_id = context.user_data.get('support_ticket_id')
+    
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ ارسال پاسخ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        context.user_data.pop('support_ticket_id', None)
+        return ConversationHandler.END
+    
+    if not ticket_id:
+        await update.message.reply_text("❌ خطا: شناسه تیکت یافت نشد.")
+        return ConversationHandler.END
+    
+    # دریافت اطلاعات تیکت
+    db = get_db()
+    c = db.cursor()
+    c.execute('''
+        SELECT st.*, u.telegram_id, u.camelot_name 
+        FROM support_tickets st
+        JOIN users u ON st.user_id = u.id
+        WHERE st.id = ?
+    ''', (ticket_id,))
+    ticket = c.fetchone()
+    
+    if not ticket:
+        db.close()
+        await update.message.reply_text("❌ تیکت یافت نشد.")
+        return ConversationHandler.END
+    
+    # ارسال پاسخ به کاربر
+    try:
+        await context.bot.send_message(
+            ticket['telegram_id'],
+            f"📩 **پاسخ به پیام شما** (تیکت #{ticket_id})\n━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📝 **پاسخ:**\n{text}\n\n"
+            f"🕐 زمان: {get_jalali_date()}",
+            parse_mode='Markdown'
+        )
+        user_received = True
+    except Exception as e:
+        logger.error(f"خطا در ارسال پاسخ به کاربر {ticket['telegram_id']}: {e}")
+        user_received = False
+    
+    # به‌روزرسانی دیتابیس
+    c.execute('''
+        UPDATE support_tickets 
+        SET reply = ?, status = 'replied', replied_at = CURRENT_TIMESTAMP 
+        WHERE id = ?
+    ''', (text, ticket_id))
+    db.commit()
+    db.close()
+    
+    log_audit(user_id, 'support_reply', f'ticket:{ticket_id}', f'user:{ticket["telegram_id"]}')
+    
+    if user_received:
+        await update.message.reply_text(
+            f"✅ **پاسخ شما با موفقیت ارسال شد.**\n\n"
+            f"تیکت #{ticket_id} - کاربر: {ticket['camelot_name']}",
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id))
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ **پاسخ در دیتابیس ذخیره شد ولی ارسال به کاربر با خطا مواجه شد.**\n"
+            f"تیکت #{ticket_id}",
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id))
+        )
+    
+    context.user_data.pop('support_ticket_id', None)
+    return ConversationHandler.END
+
+# ---------- صندوق پیام ----------
 async def notifications_menu(update: Update, context):
-    """نمایش صندوق پیام کاربر"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -923,7 +1081,7 @@ def main():
     )
     app.add_handler(broadcast_conv)
     
-    # پشتیبانی
+    # پشتیبانی کاربران
     support_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(support_start, pattern="^support$")],
         states={
@@ -932,6 +1090,17 @@ def main():
         fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
     )
     app.add_handler(support_conv)
+    
+    # مدیریت پشتیبانی
+    app.add_handler(CallbackQueryHandler(admin_support_list, pattern="^admin_support$"))
+    support_reply_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_support_reply_start, pattern="^support_reply_")],
+        states={
+            ADMIN_SUPPORT_REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_support_reply_receive)],
+        },
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(support_reply_conv)
     
     # دستورات اصلی
     app.add_handler(CommandHandler("start", start))
@@ -959,12 +1128,12 @@ def main():
     app.add_handler(CallbackQueryHandler(loan_disabled_handler, pattern="^loan_pay$"))
     app.add_handler(CallbackQueryHandler(loan_disabled_handler, pattern="^loan_status$"))
     
-    # placeholder برای بخش‌های ناقص
+    # placeholder
     for p in ["change_account",
               "admin_users","admin_finance","admin_treasury","admin_requests"]:
         app.add_handler(CallbackQueryHandler(placeholder_handler, pattern=f"^{p}$"))
     
-    print("✅ ربات بانک کملوت روشن شد! (بخش وام غیرفعال)")
+    print("✅ ربات بانک کملوت روشن شد!")
     app.run_polling()
 
 if __name__ == "__main__":
