@@ -1445,7 +1445,721 @@ async def admin_user_search(update: Update, context):
     return ConversationHandler.END
 
 # ==================== توابع مدیریت کاربر ====================
-# (برای حفظ اختصار، این توابع قبلاً در کد وجود دارند. لطفاً از نسخه قبلی کپی کنید.)
+async def admin_edit_field_start(update: Update, context, field_name, target_id):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if not is_king_or_owner(user_id) and field_name != 'notes':
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    context.user_data['admin_edit_field'] = field_name
+    context.user_data['admin_edit_target'] = target_id
+    field_names = {
+        'camelot': 'نام کملوتی',
+        'telegram': 'آیدی تلگرام',
+        'national': 'کد ملی',
+        'account': 'شماره حساب جدید',
+        'notes': 'توضیحات'
+    }
+    await query.edit_message_text(
+        f"✏️ **تغییر {field_names.get(field_name, field_name)}**\n\n"
+        f"لطفاً مقدار جدید را وارد کنید:\n"
+        f"(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_edit_value'
+
+async def admin_edit_value(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ تغییر لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
+        context.user_data.pop('admin_edit_field', None)
+        context.user_data.pop('admin_edit_target', None)
+        return ConversationHandler.END
+    field = context.user_data.get('admin_edit_field')
+    target = context.user_data.get('admin_edit_target')
+    if not field or not target:
+        await update.message.reply_text("❌ خطا: اطلاعات ناقص.")
+        return ConversationHandler.END
+    db = get_db()
+    c = db.cursor()
+    if field == 'camelot':
+        c.execute('SELECT camelot_name, telegram_id FROM users WHERE id = ?', (target,))
+        old_user = c.fetchone()
+        c.execute('UPDATE users SET camelot_name = ? WHERE id = ?', (text, target))
+        db.commit()
+        db.close()
+        if old_user:
+            await send_message_to_user(
+                context, old_user['telegram_id'],
+                f"✏️ **نام کملوتی شما تغییر کرد**\n\n"
+                f"نام قبلی: {old_user['camelot_name']}\n"
+                f"نام جدید: {text}"
+            )
+            await log_to_system('admin_action', f'تغییر نام کملوتی کاربر {old_user["camelot_name"]}', f'نام جدید: {text}', actor_id=user_id, target_id=target)
+        await update.message.reply_text(f"✅ نام کملوتی با موفقیت به `{text}` تغییر یافت.", parse_mode='Markdown')
+    elif field == 'telegram':
+        if not text.isdigit():
+            await update.message.reply_text("❌ آیدی تلگرام باید عدد باشد. دوباره وارد کنید:")
+            return 'admin_edit_value'
+        c.execute('SELECT telegram_id FROM users WHERE id = ?', (target,))
+        old_user = c.fetchone()
+        c.execute('UPDATE users SET telegram_id = ? WHERE id = ?', (int(text), target))
+        db.commit()
+        db.close()
+        if old_user:
+            await send_message_to_user(
+                context, old_user['telegram_id'],
+                f"📱 **آیدی تلگرام شما تغییر کرد**\n\n"
+                f"آیدی جدید: `{text}`",
+                parse_mode='Markdown'
+            )
+            await log_to_system('admin_action', f'تغییر آیدی تلگرام کاربر {target}', f'آیدی جدید: {text}', actor_id=user_id, target_id=target)
+        await update.message.reply_text(f"✅ آیدی تلگرام با موفقیت به `{text}` تغییر یافت.", parse_mode='Markdown')
+    elif field == 'national':
+        if len(text) != 6 or not text.isdigit():
+            await update.message.reply_text("❌ کد ملی باید ۶ رقم باشد. دوباره وارد کنید:")
+            return 'admin_edit_value'
+        c.execute('SELECT id FROM users WHERE national_id = ? AND id != ?', (text, target))
+        if c.fetchone():
+            db.close()
+            await update.message.reply_text("❌ این کد ملی قبلاً ثبت شده. لطفاً کد دیگری وارد کنید:")
+            return 'admin_edit_value'
+        c.execute('SELECT national_id, telegram_id FROM users WHERE id = ?', (target,))
+        old_user = c.fetchone()
+        c.execute('UPDATE users SET national_id = ? WHERE id = ?', (text, target))
+        db.commit()
+        db.close()
+        if old_user:
+            await send_message_to_user(
+                context, old_user['telegram_id'],
+                f"🆔 **کد ملی شما تغییر کرد**\n\n"
+                f"کد جدید: {text}"
+            )
+            await log_to_system('admin_action', f'تغییر کد ملی کاربر {target}', f'کد جدید: {text}', actor_id=user_id, target_id=target)
+        await update.message.reply_text(f"✅ کد ملی با موفقیت به `{text}` تغییر یافت.", parse_mode='Markdown')
+    elif field == 'account':
+        if len(text) != 6 or not text.isdigit():
+            await update.message.reply_text("❌ شماره حساب باید ۶ رقم باشد. دوباره وارد کنید:")
+            return 'admin_edit_value'
+        c.execute('SELECT id FROM accounts WHERE account_number = ? AND id != ?', (text, target))
+        if c.fetchone():
+            db.close()
+            await update.message.reply_text("❌ این شماره حساب قبلاً ثبت شده. لطفاً شماره دیگری وارد کنید:")
+            return 'admin_edit_value'
+        c.execute('''
+            SELECT u.telegram_id, a.account_number 
+            FROM accounts a
+            JOIN users u ON u.id = a.user_id
+            WHERE a.id = ?
+        ''', (target,))
+        old_user = c.fetchone()
+        c.execute('UPDATE accounts SET account_number = ? WHERE id = ?', (text, target))
+        db.commit()
+        db.close()
+        if old_user:
+            await send_message_to_user(
+                context, old_user['telegram_id'],
+                f"🔢 **شماره حساب شما تغییر کرد**\n\n"
+                f"شماره قدیم: {old_user['account_number']}\n"
+                f"شماره جدید: {text}"
+            )
+            await log_to_system('admin_action', f'تغییر شماره حساب کاربر {target}', f'شماره جدید: {text}', actor_id=user_id, target_id=target)
+        await update.message.reply_text(f"✅ شماره حساب با موفقیت به `{text}` تغییر یافت.", parse_mode='Markdown')
+    elif field == 'notes':
+        c.execute('''
+            SELECT u.telegram_id, u.id as user_id, a.notes 
+            FROM accounts a
+            JOIN users u ON u.id = a.user_id
+            WHERE a.id = ?
+        ''', (target,))
+        old_user = c.fetchone()
+        c.execute('UPDATE accounts SET notes = ? WHERE id = ?', (text, target))
+        db.commit()
+        db.close()
+        await log_to_system('admin_action', f'تغییر توضیحات کاربر {old_user["user_id"]}', f'توضیحات جدید: {text}', actor_id=user_id, target_id=old_user['user_id'])
+        await update.message.reply_text(f"✅ توضیحات با موفقیت به‌روز شد.", parse_mode='Markdown')
+    context.user_data.pop('admin_edit_field', None)
+    context.user_data.pop('admin_edit_target', None)
+    return ConversationHandler.END
+
+# ---------- واریز وجه ----------
+async def admin_add_balance_start(update: Update, context, account_id):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    context.user_data['admin_add_balance_account'] = account_id
+    await query.edit_message_text(
+        "💰 **واریز وجه به حساب کاربر**\n\n"
+        "لطفاً مبلغ مورد نظر را به ART وارد کنید:\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_add_balance_amount'
+
+async def admin_add_balance_amount(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ واریز لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
+        context.user_data.pop('admin_add_balance_account', None)
+        return ConversationHandler.END
+    try:
+        amount = int(text)
+        if amount <= 0:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ لطفاً یک عدد مثبت وارد کنید:")
+        return 'admin_add_balance_amount'
+    account_id = context.user_data.get('admin_add_balance_account')
+    if not account_id:
+        await update.message.reply_text("❌ خطا: شناسه حساب یافت نشد.")
+        return ConversationHandler.END
+    db = get_db()
+    c = db.cursor()
+    c.execute('SELECT balance, user_id, account_number FROM accounts WHERE id = ?', (account_id,))
+    acc = c.fetchone()
+    if not acc:
+        db.close()
+        await update.message.reply_text("❌ حساب یافت نشد.")
+        return ConversationHandler.END
+    c.execute('SELECT camelot_name FROM users WHERE id = ?', (acc['user_id'],))
+    user = c.fetchone()
+    user_name = user['camelot_name'] if user else 'کاربر'
+    new_balance = acc['balance'] + amount
+    c.execute('UPDATE accounts SET balance = ? WHERE id = ?', (new_balance, account_id))
+    txid = generate_txid()
+    c.execute('''
+        INSERT INTO transactions (txid, receiver_account, amount, type, reason)
+        VALUES (?, ?, ?, 'manual_deposit', 'واریز مدیریتی')
+    ''', (txid, acc['account_number'], amount))
+    db.commit()
+    db.close()
+    log_audit(user_id, 'manual_deposit', f'account:{account_id}', f'amount:{amount}')
+    role_display = get_user_role_display(user_id)
+    await send_message_to_user(
+        context, acc['user_id'],
+        f"💰 **واریز مدیریتی به حساب شما**\n\n"
+        f"مبلغ: {amount} ART\n"
+        f"موجودی جدید: {new_balance} ART\n"
+        f"انجام شده توسط: {role_display}"
+    )
+    await update.message.reply_text(
+        f"✅ مبلغ {amount} ART با موفقیت به حساب واریز شد.\n"
+        f"موجودی جدید: {new_balance} ART",
+        reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
+    )
+    await log_to_system(
+        'admin_action',
+        f'واریز مدیریتی به حساب {user_name}',
+        f'مبلغ: {amount} ART\nتوسط: {role_display}',
+        actor_id=user_id,
+        target_id=acc['user_id']
+    )
+    context.user_data.pop('admin_add_balance_account', None)
+    return ConversationHandler.END
+
+# ---------- برداشت موجودی ----------
+async def admin_withdraw_balance_start(update: Update, context, account_id):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    context.user_data['admin_withdraw_account'] = account_id
+    await query.edit_message_text(
+        "📤 **برداشت موجودی از حساب کاربر**\n\n"
+        "لطفاً مبلغ مورد نظر را به ART وارد کنید:\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_withdraw_amount'
+
+async def admin_withdraw_amount(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ برداشت لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
+        context.user_data.pop('admin_withdraw_account', None)
+        context.user_data.pop('admin_withdraw_amount', None)
+        return ConversationHandler.END
+    try:
+        amount = int(text)
+        if amount <= 0:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ لطفاً یک عدد مثبت وارد کنید:")
+        return 'admin_withdraw_amount'
+    account_id = context.user_data.get('admin_withdraw_account')
+    if not account_id:
+        await update.message.reply_text("❌ خطا: شناسه حساب یافت نشد.")
+        return ConversationHandler.END
+    db = get_db()
+    c = db.cursor()
+    c.execute('SELECT balance, user_id, account_number, blocked_balance FROM accounts WHERE id = ?', (account_id,))
+    acc = c.fetchone()
+    if not acc:
+        db.close()
+        await update.message.reply_text("❌ حساب یافت نشد.")
+        return ConversationHandler.END
+    usable_balance = acc['balance'] - acc['blocked_balance']
+    if amount > usable_balance:
+        await update.message.reply_text(f"❌ موجودی قابل استفاده کافی نیست.\nموجودی قابل استفاده: {usable_balance} ART")
+        return 'admin_withdraw_amount'
+    context.user_data['admin_withdraw_amount'] = amount
+    context.user_data['admin_withdraw_sender_account'] = acc['account_number']
+    context.user_data['admin_withdraw_user_id'] = acc['user_id']
+    context.user_data['admin_withdraw_account_id'] = account_id
+    await update.message.reply_text(
+        "📤 **شماره حساب مقصد را وارد کنید:**\n\n"
+        "لطفاً شماره حساب ۶ رقمی مقصد را وارد کنید:\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_withdraw_destination'
+
+async def admin_withdraw_destination(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ برداشت لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
+        context.user_data.pop('admin_withdraw_account', None)
+        context.user_data.pop('admin_withdraw_amount', None)
+        context.user_data.pop('admin_withdraw_sender_account', None)
+        context.user_data.pop('admin_withdraw_user_id', None)
+        context.user_data.pop('admin_withdraw_account_id', None)
+        return ConversationHandler.END
+    if len(text) != 6 or not text.isdigit():
+        await update.message.reply_text("❌ شماره حساب باید ۶ رقم باشد. دوباره وارد کنید:")
+        return 'admin_withdraw_destination'
+    dest_account_number = text
+    sender_account = context.user_data.get('admin_withdraw_sender_account')
+    if dest_account_number == sender_account:
+        await update.message.reply_text("❌ نمی‌توانید به همان حساب انتقال دهید.")
+        return 'admin_withdraw_destination'
+    dest_acc = get_account_by_number(dest_account_number)
+    if not dest_acc:
+        await update.message.reply_text("❌ شماره حساب مقصد یافت نشد. دوباره وارد کنید:")
+        return 'admin_withdraw_destination'
+    amount = context.user_data.get('admin_withdraw_amount')
+    account_id = context.user_data.get('admin_withdraw_account_id')
+    user_id = context.user_data.get('admin_withdraw_user_id')
+    if not amount or not account_id or not user_id:
+        await update.message.reply_text("❌ خطا: اطلاعات ناقص.")
+        return ConversationHandler.END
+    db = get_db()
+    c = db.cursor()
+    c.execute('SELECT balance FROM accounts WHERE id = ?', (account_id,))
+    sender = c.fetchone()
+    new_sender_balance = sender['balance'] - amount
+    c.execute('UPDATE accounts SET balance = ? WHERE id = ?', (new_sender_balance, account_id))
+    c.execute('SELECT balance FROM accounts WHERE account_number = ?', (dest_account_number,))
+    receiver = c.fetchone()
+    new_receiver_balance = receiver['balance'] + amount
+    c.execute('UPDATE accounts SET balance = ? WHERE account_number = ?', (new_receiver_balance, dest_account_number))
+    txid = generate_txid()
+    c.execute('''
+        INSERT INTO transactions (txid, sender_account, receiver_account, amount, type, reason)
+        VALUES (?, ?, ?, ?, 'manual_withdraw', 'برداشت مدیریتی')
+    ''', (txid, sender_account, dest_account_number, amount))
+    db.commit()
+    db.close()
+    log_audit(user_id, 'manual_withdraw', f'from:{account_id}', f'to:{dest_account_number}, amount:{amount}')
+    role_display = get_user_role_display(update.effective_user.id)
+    await send_message_to_user(
+        context, user_id,
+        f"📤 **برداشت مدیریتی از حساب شما**\n\n"
+        f"مبلغ: {amount} ART\n"
+        f"به شماره حساب: {dest_account_number}\n"
+        f"موجودی جدید: {new_sender_balance} ART\n"
+        f"انجام شده توسط: {role_display}"
+    )
+    dest_user = get_user_by_account_number(dest_account_number)
+    if dest_user:
+        await send_message_to_user(
+            context, dest_user['telegram_id'],
+            f"📥 **واریز مدیریتی به حساب شما**\n\n"
+            f"مبلغ: {amount} ART\n"
+            f"از حساب: {sender_account}\n"
+            f"موجودی جدید: {new_receiver_balance} ART"
+        )
+    await update.message.reply_text(
+        f"✅ مبلغ {amount} ART با موفقیت از حساب کاربر برداشت و به حساب {dest_account_number} واریز شد.",
+        reply_markup=main_menu_keyboard(get_user_role_display(update.effective_user.id), user_id)
+    )
+    sender_name = get_user_by_account_number(sender_account)
+    sender_name = sender_name['camelot_name'] if sender_name else 'کاربر'
+    dest_name = get_user_by_account_number(dest_account_number)
+    dest_name = dest_name['camelot_name'] if dest_name else 'کاربر'
+    await log_to_system(
+        'admin_action',
+        f'برداشت مدیریتی از حساب {sender_name}',
+        f'مبلغ: {amount} ART\nبه حساب: {dest_name} ({dest_account_number})\nتوسط: {role_display}',
+        actor_id=user_id,
+        target_id=user_id
+    )
+    context.user_data.pop('admin_withdraw_account', None)
+    context.user_data.pop('admin_withdraw_amount', None)
+    context.user_data.pop('admin_withdraw_sender_account', None)
+    context.user_data.pop('admin_withdraw_user_id', None)
+    context.user_data.pop('admin_withdraw_account_id', None)
+    return ConversationHandler.END
+
+# ---------- بلوکه موجودی ----------
+async def admin_freeze_balance_start(update: Update, context, account_id):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    context.user_data['admin_freeze_account'] = account_id
+    await query.edit_message_text(
+        "🧊 **بلوکه کردن موجودی کاربر**\n\n"
+        "لطفاً مبلغی که می‌خواهید بلوکه کنید را وارد کنید:\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_freeze_amount'
+
+async def admin_freeze_amount(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ بلوکه لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
+        context.user_data.pop('admin_freeze_account', None)
+        return ConversationHandler.END
+    try:
+        amount = int(text)
+        if amount <= 0:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ لطفاً یک عدد مثبت وارد کنید:")
+        return 'admin_freeze_amount'
+    account_id = context.user_data.get('admin_freeze_account')
+    if not account_id:
+        await update.message.reply_text("❌ خطا: شناسه حساب یافت نشد.")
+        return ConversationHandler.END
+    db = get_db()
+    c = db.cursor()
+    c.execute('SELECT balance, blocked_balance, user_id, account_number FROM accounts WHERE id = ?', (account_id,))
+    acc = c.fetchone()
+    if not acc:
+        db.close()
+        await update.message.reply_text("❌ حساب یافت نشد.")
+        return ConversationHandler.END
+    if amount > acc['balance'] - acc['blocked_balance']:
+        await update.message.reply_text(f"❌ موجودی قابل استفاده کافی نیست.\nموجودی قابل استفاده: {acc['balance'] - acc['blocked_balance']} ART")
+        return 'admin_freeze_amount'
+    c.execute('SELECT camelot_name FROM users WHERE id = ?', (acc['user_id'],))
+    user = c.fetchone()
+    user_name = user['camelot_name'] if user else 'کاربر'
+    new_blocked = acc['blocked_balance'] + amount
+    c.execute('UPDATE accounts SET blocked_balance = ? WHERE id = ?', (new_blocked, account_id))
+    db.commit()
+    db.close()
+    log_audit(user_id, 'freeze_balance', f'account:{account_id}', f'amount:{amount}')
+    role_display = get_user_role_display(user_id)
+    await send_message_to_user(
+        context, acc['user_id'],
+        f"🧊 **بخشی از موجودی شما بلوکه شد**\n\n"
+        f"مبلغ بلوکه شده: {amount} ART\n"
+        f"موجودی بلوکه شده جدید: {new_blocked} ART\n"
+        f"انجام شده توسط: {role_display}"
+    )
+    await update.message.reply_text(
+        f"✅ مبلغ {amount} ART با موفقیت بلوکه شد.\n"
+        f"موجودی بلوکه شده جدید: {new_blocked} ART",
+        reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
+    )
+    await log_to_system(
+        'admin_action',
+        f'بلوکه موجودی حساب {user_name}',
+        f'مبلغ: {amount} ART\nتوسط: {role_display}',
+        actor_id=user_id,
+        target_id=acc['user_id']
+    )
+    context.user_data.pop('admin_freeze_account', None)
+    return ConversationHandler.END
+
+# ---------- تغییر وضعیت حساب (فقط شاه/مالک) ----------
+async def admin_change_status(update: Update, context, account_id):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if not is_king_or_owner(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    db = get_db()
+    c = db.cursor()
+    c.execute('SELECT status, user_id FROM accounts WHERE id = ?', (account_id,))
+    acc = c.fetchone()
+    if not acc:
+        db.close()
+        await query.edit_message_text("❌ حساب یافت نشد.")
+        return
+    new_status = 'blocked' if acc['status'] == 'active' else 'active'
+    c.execute('UPDATE accounts SET status = ? WHERE id = ?', (new_status, account_id))
+    db.commit()
+    db.close()
+    status_names = {'active': 'فعال', 'blocked': 'مسدود'}
+    log_audit(user_id, 'change_status', f'account:{account_id}', f'new:{new_status}')
+    await send_message_to_user(
+        context, acc['user_id'],
+        f"📊 **وضعیت حساب شما تغییر کرد**\n\n"
+        f"وضعیت جدید: **{status_names[new_status]}**"
+    )
+    await query.edit_message_text(
+        f"✅ وضعیت حساب با موفقیت به **{status_names[new_status]}** تغییر یافت.",
+        reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id),
+        parse_mode='Markdown'
+    )
+    await log_to_system('admin_action', f'تغییر وضعیت حساب کاربر', f'وضعیت جدید: {status_names[new_status]}', actor_id=user_id, target_id=acc['user_id'])
+
+# ---------- تغییر امتیاز (فقط شاه/مالک) ----------
+async def admin_change_score_start(update: Update, context, account_id):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if not is_king_or_owner(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    context.user_data['admin_score_account'] = account_id
+    await query.edit_message_text(
+        "⭐ **تغییر امتیاز اعتباری**\n\n"
+        "لطفاً امتیاز جدید را وارد کنید (۰ تا ۱۰۰۰):\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_change_score_value'
+
+async def admin_change_score_value(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ تغییر امتیاز لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
+        context.user_data.pop('admin_score_account', None)
+        return ConversationHandler.END
+    try:
+        new_score = int(text)
+        if new_score < 0 or new_score > 1000:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ امتیاز باید عددی بین 0 تا 1000 باشد. دوباره وارد کنید:")
+        return 'admin_change_score_value'
+    account_id = context.user_data.get('admin_score_account')
+    if not account_id:
+        await update.message.reply_text("❌ خطا: شناسه حساب یافت نشد.")
+        return ConversationHandler.END
+    db = get_db()
+    c = db.cursor()
+    c.execute('SELECT credit_score, user_id FROM accounts WHERE id = ?', (account_id,))
+    acc = c.fetchone()
+    if not acc:
+        db.close()
+        await update.message.reply_text("❌ حساب یافت نشد.")
+        return ConversationHandler.END
+    c.execute('UPDATE accounts SET credit_score = ? WHERE id = ?', (new_score, account_id))
+    c.execute('INSERT INTO credit_history (account_id, old_score, new_score, reason) VALUES (?, ?, ?, ?)',
+              (account_id, acc['credit_score'], new_score, 'تغییر توسط مدیریت'))
+    db.commit()
+    db.close()
+    log_audit(user_id, 'change_score', f'account:{account_id}', f'old:{acc["credit_score"]},new:{new_score}')
+    await send_message_to_user(
+        context, acc['user_id'],
+        f"⭐ **امتیاز اعتباری شما تغییر کرد**\n\n"
+        f"امتیاز قدیم: {acc['credit_score']}\n"
+        f"امتیاز جدید: {new_score}"
+    )
+    await update.message.reply_text(
+        f"✅ امتیاز اعتباری با موفقیت به **{new_score}** تغییر یافت.",
+        reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id),
+        parse_mode='Markdown'
+    )
+    await log_to_system('admin_action', f'تغییر امتیاز اعتباری کاربر', f'امتیاز جدید: {new_score}', actor_id=user_id, target_id=acc['user_id'])
+    context.user_data.pop('admin_score_account', None)
+    return ConversationHandler.END
+
+# ---------- تغییر نقش (فقط شاه/مالک) ----------
+async def admin_change_role(update: Update, context, user_id):
+    query = update.callback_query
+    await query.answer()
+    admin_user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(admin_user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if not is_king_or_owner(admin_user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    db = get_db()
+    c = db.cursor()
+    c.execute('SELECT role, telegram_id, camelot_name FROM users WHERE id = ?', (user_id,))
+    user = c.fetchone()
+    if not user:
+        db.close()
+        await query.edit_message_text("❌ کاربر یافت نشد.")
+        return
+    roles = ['citizen', 'employee', 'king']
+    current_role = user['role']
+    try:
+        idx = roles.index(current_role)
+        new_role = roles[(idx + 1) % len(roles)]
+    except:
+        new_role = 'citizen'
+    c.execute('UPDATE users SET role = ? WHERE id = ?', (new_role, user_id))
+    db.commit()
+    db.close()
+    role_names = {'citizen':'شهروند', 'employee':'کارمند', 'king':'شاه', 'owner':'مالک'}
+    await send_message_to_user(
+        context, user['telegram_id'],
+        f"👑 **نقش شما در بانک تغییر کرد**\n\n"
+        f"نقش جدید: **{role_names[new_role]}**"
+    )
+    await query.edit_message_text(
+        f"✅ نقش کاربر با موفقیت به **{role_names[new_role]}** تغییر یافت.",
+        reply_markup=main_menu_keyboard(get_user_role_display(admin_user_id), admin_user_id),
+        parse_mode='Markdown'
+    )
+    await log_to_system('admin_action', f'تغییر نقش کاربر {user["camelot_name"]}', f'نقش جدید: {role_names[new_role]}', actor_id=admin_user_id, target_id=user_id)
+
+# ---------- ارسال گزارش به مدیریت (فقط کارمند) ----------
+async def admin_report_user(update: Update, context, target_user_id):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if not is_employee(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    context.user_data['admin_report_target'] = target_user_id
+    await query.edit_message_text(
+        "📨 **ارسال گزارش به مدیریت**\n\n"
+        "لطفاً دلیل گزارش خود را وارد کنید:\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_report_reason'
+
+async def admin_report_reason(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    target_user_id = context.user_data.get('admin_report_target')
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ ارسال گزارش لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
+        context.user_data.pop('admin_report_target', None)
+        return ConversationHandler.END
+    if not target_user_id:
+        await update.message.reply_text("❌ خطا: شناسه کاربر یافت نشد.")
+        return ConversationHandler.END
+    db = get_db()
+    c = db.cursor()
+    c.execute('''
+        SELECT u.*, a.account_number, a.balance, a.blocked_balance, a.credit_score, a.status
+        FROM users u
+        JOIN accounts a ON u.id = a.user_id
+        WHERE u.id = ?
+    ''', (target_user_id,))
+    target = c.fetchone()
+    db.close()
+    if not target:
+        await update.message.reply_text("❌ کاربر یافت نشد.")
+        return ConversationHandler.END
+    reporter = get_user_by_telegram_id(user_id)
+    role_names = {'citizen':'شهروند', 'employee':'کارمند', 'king':'شاه', 'owner':'مالک'}
+    status_names = {'active': 'فعال', 'blocked': 'مسدود'}
+    report_message = f"""📨 **گزارش جدید از سوی کارمند**
+
+👤 **کارمند گزارش‌دهنده:** {reporter['real_name']} ({reporter['camelot_name']})
+🆔 آیدی تلگرام کارمند: {reporter['telegram_id']}
+
+━━━━━━━━━━━━━━━━━━━
+**اطلاعات کاربر مورد گزارش:**
+
+👤 **نام واقعی:** {target['real_name']}
+⚔️ **نام کملوتی:** {target['camelot_name']}
+🆔 **کد ملی:** {target['national_id']}
+🏦 **شماره حساب:** {target['account_number']}
+💰 **موجودی:** {target['balance']} ART
+🔒 **موجودی بلوکه:** {target['blocked_balance']} ART
+⭐ **امتیاز اعتباری:** {target['credit_score']}
+👑 **نقش:** {role_names.get(target['role'], 'نامشخص')}
+📊 **وضعیت:** {status_names.get(target['status'], 'نامشخص')}
+📱 **آیدی تلگرام:** {target['telegram_id']}
+━━━━━━━━━━━━━━━━━━━
+
+📝 **دلیل گزارش:**
+{text}
+
+🕐 **زمان:** {get_jalali_date()}
+"""
+    admin_ids = list({OWNER_ID, KING_ID})
+    sent_to = []
+    for admin_id in admin_ids:
+        try:
+            await context.bot.send_message(admin_id, report_message, parse_mode='Markdown')
+            sent_to.append(admin_id)
+        except Exception as e:
+            logger.error(f"خطا در ارسال گزارش به {admin_id}: {e}")
+    if sent_to:
+        await update.message.reply_text(
+            f"✅ **گزارش شما با موفقیت ارسال شد.**\n\n"
+            f"کاربر: {target['camelot_name']}",
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
+        )
+        await log_to_system('report', f'گزارش کارمند درباره {target["camelot_name"]}', f'دلیل: {text}', actor_id=user_id, target_id=target_user_id)
+    else:
+        await update.message.reply_text(
+            "❌ ارسال گزارش با مشکل مواجه شد. لطفاً بعداً تلاش کنید.",
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
+        )
+    context.user_data.pop('admin_report_target', None)
+    return ConversationHandler.END
 
 # ==================== لاگ‌های سیستم ====================
 async def admin_logs_list(update: Update, context, page=0, log_type=None):
