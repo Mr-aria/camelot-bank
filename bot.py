@@ -2223,7 +2223,6 @@ async def admin_logs_list(update: Update, context, page=0, log_type=None):
         filter_row.append(InlineKeyboardButton(label, callback_data=f"admin_logs_filter_{value}"))
     keyboard.append(filter_row)
     keyboard.append([InlineKeyboardButton("📋 همه لاگ‌ها", callback_data="admin_logs_filter_all")])
-    keyboard.append([InlineKeyboardButton("📥 دریافت فایل TXT همه لاگ‌ها", callback_data="admin_logs_export_txt")])
     keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="back_to_panel")])
     await query.edit_message_text(
         text,
@@ -2231,98 +2230,196 @@ async def admin_logs_list(update: Update, context, page=0, log_type=None):
         parse_mode='Markdown'
     )
 
-async def admin_logs_export_txt(update: Update, context):
-    """دریافت فایل TXT از تمام لاگ‌های سیستم"""
+async def admin_logs_page_handler(update: Update, context):
+    query = update.callback_query
+    data = query.data
+    parts = data.split('_')
+    log_type = parts[3] if parts[3] != 'all' else None
+    page = int(parts[4])
+    await admin_logs_list(update, context, page, log_type)
+
+async def admin_logs_filter_handler(update: Update, context):
+    query = update.callback_query
+    data = query.data
+    log_type = data.replace('admin_logs_filter_', '')
+    if log_type == 'all':
+        log_type = None
+    await admin_logs_list(update, context, 0, log_type)
+
+# ==================== پشتیبان‌گیری و بازیابی (فقط مالک) ====================
+async def admin_backup_menu(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
     if not is_bot_online() and not is_owner(user_id):
         await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
         return
-    if not is_admin(user_id):
+    user = get_user_by_telegram_id(user_id)
+    if not user or user['role'] != 'owner':
+        await query.edit_message_text("⛔ دسترسی ندارید. این بخش فقط برای مالک است.")
+        return
+    keyboard = [
+        [InlineKeyboardButton("📥 گرفتن پشتیبان", callback_data="admin_backup_export")],
+        [InlineKeyboardButton("📤 بازیابی از پشتیبان", callback_data="admin_backup_import")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_panel")]
+    ]
+    await query.edit_message_text(
+        "💾 **پشتیبان‌گیری و بازیابی**\n\n"
+        "• **گرفتن پشتیبان:** یک فایل JSON کامل از تمام اطلاعات بانک تهیه می‌شود.\n"
+        "• **بازیابی:** با ارسال فایل پشتیبان، اطلاعات قبلی بازگردانده می‌شود.\n\n"
+        "⚠️ **هشدار:** بازیابی تمام اطلاعات فعلی را بازنویسی می‌کند!",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def admin_backup_export(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user or user['role'] != 'owner':
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
-
-    await query.edit_message_text("📥 در حال آماده‌سازی فایل لاگ‌ها... لطفاً صبر کنید.", parse_mode='Markdown')
-
+    await query.edit_message_text("📥 در حال تهیه پشتیبان... لطفاً صبر کنید.", parse_mode='Markdown')
     try:
-        logs, total = get_system_logs(limit=1000000, offset=0, log_type=None)
-
-        if total == 0:
-            await query.edit_message_text(
-                "📭 **هیچ لاگی در سیستم ثبت نشده است.**",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_logs")]])
-            )
-            return
-
-        txt_content = f"""═══════════════════════════════════════════════════
-               گزارش کامل لاگ‌های سیستم بانک کملوت
-═══════════════════════════════════════════════════
-تعداد کل لاگ‌ها: {total}
-تاریخ تولید: {get_jalali_date()}
-═══════════════════════════════════════════════════
-
-"""
-
-        for log in logs:
-            created = datetime.strptime(log['created_at'], '%Y-%m-%d %H:%M:%S')
-            jcreated = jdatetime.datetime.fromgregorian(datetime=created)
-            date_str = jcreated.strftime('%Y/%m/%d - %H:%M')
-            
-            log_type_persian = {
-                'transaction': 'تراکنش',
-                'admin_action': 'عملیات مدیریتی',
-                'support': 'پشتیبانی',
-                'report': 'گزارش',
-                'error': 'خطا',
-                'system': 'سیستمی'
-            }.get(log['log_type'], 'نامشخص')
-            
-            actor = log['actor_name'] or 'سیستم'
-            target = log['target_name'] or '-'
-            
-            txt_content += f"""─────────────────────────────────────────────────
-🕐 تاریخ: {date_str}
-📌 نوع: {log_type_persian}
-📋 عنوان: {log['title']}
-📝 محتوا: {log['content']}
-👤 انجام‌دهنده: {actor}
-🎯 هدف: {target}
-─────────────────────────────────────────────────
-
-"""
-
-        txt_content += f"""═══════════════════════════════════════════════════
-                    پایان گزارش
-═══════════════════════════════════════════════════"""
-
-        file_obj = io.BytesIO(txt_content.encode('utf-8'))
-        file_obj.name = f"camelot_logs_{datetime.now(TEHRAN_TZ).strftime('%Y%m%d_%H%M%S')}.txt"
-
+        json_data = export_full_backup()
+        file_obj = io.BytesIO(json_data.encode('utf-8'))
+        file_obj.name = f"camelot_backup_{datetime.now(TEHRAN_TZ).strftime('%Y%m%d_%H%M%S')}.json"
         await context.bot.send_document(
             chat_id=user_id,
             document=file_obj,
-            caption=f"📋 **گزارش کامل لاگ‌های سیستم**\n\n"
-                    f"تعداد کل: {total} لاگ\n"
-                    f"🕐 تاریخ تولید: {get_jalali_date()}\n\n"
-                    "📌 این فایل شامل تمام رویدادهای ثبت‌شده در سیستم بانک کملوت است.",
+            caption="💾 **پشتیبان بانک کملوت**\n\n"
+                    f"🕐 تاریخ: {get_jalali_date()}\n"
+                    "📌 این فایل شامل تمام اطلاعات بانک است.\n"
+                    "برای بازیابی، از بخش «بازیابی از پشتیبان» استفاده کنید.",
             parse_mode='Markdown'
         )
-
-        await log_to_system('admin_action', 'خروجی لاگ‌ها به صورت فایل TXT', f'تعداد: {total}', actor_id=user_id)
-
+        await log_to_system('admin_action', 'پشتیبان‌گیری', f'توسط: {user["camelot_name"]}', actor_id=user_id)
         await query.edit_message_text(
-            f"✅ **فایل لاگ‌ها با موفقیت ارسال شد.**\n\n"
-            f"تعداد لاگ‌های موجود در فایل: {total}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به لاگ‌ها", callback_data="admin_logs")]])
+            "✅ **پشتیبان با موفقیت تهیه و ارسال شد.**\n\n"
+            "فایل JSON را در جای امن نگهداری کنید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="admin_backup")]]),
+            parse_mode='Markdown'
         )
-
     except Exception as e:
-        logger.error(f"خطا در ساخت فایل لاگ: {e}")
+        logger.error(f"خطا در تهیه پشتیبان: {e}")
         await query.edit_message_text(
-            f"❌ خطا در ساخت فایل: {str(e)}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_logs")]])
+            f"❌ خطا در تهیه پشتیبان: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
         )
+
+async def admin_backup_import_start(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user or user['role'] != 'owner':
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    await query.edit_message_text(
+        "📤 **بازیابی از پشتیبان**\n\n"
+        "⚠️ **هشدار مهم:**\n"
+        "• این عملیات **تمام اطلاعات فعلی** بانک را بازنویسی می‌کند.\n"
+        "• قبل از ادامه، حتماً یک پشتیبان جدید بگیرید.\n"
+        "• فقط فایل‌های JSON معتبر که توسط ربات تولید شده‌اند قابل قبول هستند.\n\n"
+        "لطفاً فایل پشتیبان (JSON) را ارسال کنید.\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_backup_import_file'
+
+async def admin_backup_import_file(update: Update, context):
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    user = get_user_by_telegram_id(user_id)
+    if not user or user['role'] != 'owner':
+        await update.message.reply_text("⛔ دسترسی ندارید.")
+        return ConversationHandler.END
+    document = update.message.document
+    if not document:
+        await update.message.reply_text(
+            "❌ لطفاً یک فایل ارسال کنید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+        )
+        return 'admin_backup_import_file'
+    if not document.file_name.endswith('.json'):
+        await update.message.reply_text(
+            "❌ فقط فایل‌های JSON معتبر هستند.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+        )
+        return 'admin_backup_import_file'
+    await update.message.reply_text("📥 در حال دریافت فایل...", parse_mode='Markdown')
+    try:
+        file = await context.bot.get_file(document.file_id)
+        file_content = await file.download_as_bytearray()
+        json_data = file_content.decode('utf-8')
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ بله، بازیابی کن", callback_data="admin_backup_import_confirm")],
+            [InlineKeyboardButton("❌ لغو", callback_data="admin_backup")]
+        ])
+        await update.message.reply_text(
+            "⚠️ **تأیید نهایی بازیابی**\n\n"
+            "آیا از بازنویسی کامل اطلاعات مطمئن هستید؟\n"
+            "این عملیات قابل بازگشت نیست!",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+        context.user_data['backup_json_data'] = json_data
+    except Exception as e:
+        logger.error(f"خطا در دریافت فایل پشتیبان: {e}")
+        await update.message.reply_text(
+            f"❌ خطا در دریافت فایل: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+        )
+    return ConversationHandler.END
+
+async def admin_backup_import_confirm(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user or user['role'] != 'owner':
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    json_data = context.user_data.get('backup_json_data')
+    if not json_data:
+        await query.edit_message_text("❌ خطا: داده‌های پشتیبان یافت نشد.")
+        return
+    await query.edit_message_text("🔄 در حال بازیابی اطلاعات... لطفاً صبر کنید.", parse_mode='Markdown')
+    try:
+        success, message = import_full_backup(json_data)
+        if success:
+            await log_to_system('admin_action', 'بازیابی اطلاعات', f'توسط: {user["camelot_name"]}', actor_id=user_id)
+            await query.edit_message_text(
+                "✅ **بازیابی با موفقیت انجام شد!**\n\n"
+                "تمام اطلاعات بانک به نسخه پشتیبان بازگردانده شد.\n"
+                "لطفاً ربات را ری‌استارت کنید تا تغییرات اعمال شوند.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="back_to_panel")]]),
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ **خطا در بازیابی:**\n{message}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+            )
+    except Exception as e:
+        logger.error(f"خطا در بازیابی: {e}")
+        await query.edit_message_text(
+            f"❌ خطا در بازیابی: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+        )
+    context.user_data.pop('backup_json_data', None)
 
 # ==================== صندوق پیام ====================
 async def notifications_menu(update: Update, context):
@@ -2543,7 +2640,6 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_logs_list, pattern="^admin_logs$"))
     app.add_handler(CallbackQueryHandler(admin_logs_page_handler, pattern="^admin_logs_page_"))
     app.add_handler(CallbackQueryHandler(admin_logs_filter_handler, pattern="^admin_logs_filter_"))
-    app.add_handler(CallbackQueryHandler(admin_logs_export_txt, pattern="^admin_logs_export_txt$"))
 
     # پشتیبان‌گیری و بازیابی
     app.add_handler(CallbackQueryHandler(admin_backup_menu, pattern="^admin_backup$"))
