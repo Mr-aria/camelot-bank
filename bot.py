@@ -88,10 +88,12 @@ def get_jalali_date_only():
     return jnow.strftime("%Y/%m/%d")
 
 async def log_to_channel(context, message: str):
+    """ارسال پیام به کانال لاگ با مدیریت خطا"""
     try:
-        await context.bot.send_message(LOG_CHANNEL_ID, message)
+        await context.bot.send_message(LOG_CHANNEL_ID, message, parse_mode='Markdown')
+        logger.info(f"✅ پیام به کانال لاگ ارسال شد: {message[:50]}...")
     except Exception as e:
-        logger.error(f"خطا در ارسال به کانال لاگ: {e}")
+        logger.error(f"❌ خطا در ارسال به کانال لاگ: {e}")
 
 async def log_transaction_to_channel(context, tx_type, sender_info, receiver_info, amount, fee=0, reason=None, sender_new_balance=None, receiver_new_balance=None):
     """ارسال فاکتور کامل تراکنش به کانال لاگ"""
@@ -119,8 +121,9 @@ async def log_transaction_to_channel(context, tx_type, sender_info, receiver_inf
         log_message += "\n━━━━━━━━━━━━━━━━━━━"
         
         await context.bot.send_message(LOG_CHANNEL_ID, log_message, parse_mode='Markdown')
+        logger.info(f"✅ لاگ تراکنش به کانال ارسال شد: {tx_type}")
     except Exception as e:
-        logger.error(f"خطا در ارسال لاگ تراکنش به کانال: {e}")
+        logger.error(f"❌ خطا در ارسال لاگ تراکنش به کانال: {e}")
 
 async def send_message_to_user(context, user_id: int, text: str):
     try:
@@ -222,6 +225,7 @@ async def my_info_callback(update: Update, context):
 ⭐ امتیاز اعتباری: {acc['credit_score']}
 👑 نقش: {get_user_role_display(user_id)}
 📊 وضعیت: {status_persian}
+📝 توضیحات: {acc['notes'] or 'ندارد'}
 🕐 آخرین به‌روزرسانی: {now_jalali}
 ━━━━━━━━━━━━━━━━━━━"""
     keyboard = InlineKeyboardMarkup([
@@ -307,17 +311,12 @@ async def panel_callback(update: Update, context):
     role_persian = get_user_role_display(user_id)
     now_jalali = get_jalali_date()
     
-    # تعیین دکمه‌ها بر اساس نقش
     keyboard = []
-    
-    # مدیریت کاربران برای همه
     keyboard.append([InlineKeyboardButton("👥 مدیریت کاربران", callback_data="admin_users")])
     
-    # فقط شاه/مالک می‌توانند پیام همگانی بفرستند
     if is_king_or_owner(user_id):
         keyboard.append([InlineKeyboardButton("📣 ارسال پیام همگانی", callback_data="admin_broadcast")])
     
-    # پیام‌های پشتیبانی برای همه مدیران (کارمند و شاه)
     keyboard.append([InlineKeyboardButton("📨 پیام‌های پشتیبانی", callback_data="admin_support")])
     keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")])
     
@@ -1056,7 +1055,7 @@ async def admin_users_list(update: Update, context, page=0):
     offset = page * USERS_PER_PAGE
     c.execute('''
         SELECT u.id, u.telegram_id, u.real_name, u.camelot_name, u.national_id, u.role, u.created_at,
-               a.account_number, a.balance, a.blocked_balance, a.credit_score, a.status
+               a.account_number, a.balance, a.blocked_balance, a.credit_score, a.status, a.notes
         FROM users u
         JOIN accounts a ON u.id = a.user_id
         ORDER BY u.created_at DESC
@@ -1068,12 +1067,10 @@ async def admin_users_list(update: Update, context, page=0):
     text = f"👥 **لیست کاربران بانک کملوت**\n━━━━━━━━━━━━━━━━━━━\n"
     text += f"تعداد کل: {total_users} کاربر | صفحه {page+1}\n━━━━━━━━━━━━━━━━━━━\n\n"
     
-    # اگر کاربر کارمند است، اطلاعات شاه و مالک را نشان نده
     viewer_role = get_user_role_display(user_id)
     is_viewer_employee = is_employee(user_id)
     
     for idx, u in enumerate(users, start=offset+1):
-        # اگر کارمند است و کاربر شاه/مالک است، رد کن
         if is_viewer_employee and u['role'] in ['king', 'owner']:
             continue
             
@@ -1090,6 +1087,7 @@ async def admin_users_list(update: Update, context, page=0):
         text += f"👑 نقش: {role_persian}\n"
         text += f"📊 وضعیت: {status_persian}\n"
         text += f"📱 آیدی تلگرام: {u['telegram_id']}\n"
+        text += f"📝 توضیحات: {u['notes'] or 'ندارد'}\n"
         created = datetime.strptime(u['created_at'], '%Y-%m-%d %H:%M:%S')
         jcreated = jdatetime.datetime.fromgregorian(datetime=created)
         text += f"📅 تاریخ افتتاح: {jcreated.strftime('%Y/%m/%d')}\n"
@@ -1168,7 +1166,6 @@ async def admin_user_search(update: Update, context):
         await update.message.reply_text("❌ کاربری با این کد ملی یافت نشد. دوباره وارد کنید:")
         return 'admin_user_search'
     
-    # اگر کارمند است و کاربر شاه/مالک است، اجازه نده
     if is_employee(user_id) and user['role'] in ['king', 'owner']:
         await update.message.reply_text("⛔ شما دسترسی به اطلاعات این کاربر را ندارید.")
         return ConversationHandler.END
@@ -1198,18 +1195,18 @@ async def admin_user_search(update: Update, context):
 📊 **وضعیت:** {status_persian}
 📱 **آیدی تلگرام:** `{user['telegram_id']}`
 📅 **تاریخ افتتاح:** {date_str}
-📝 **یادداشت:** {user['notes'] or 'ندارد'}
+📝 **توضیحات:** {user['notes'] or 'ندارد'}
 ━━━━━━━━━━━━━━━━━━━
 """
     
-    # ساخت دکمه‌ها بر اساس نقش
     keyboard = []
     
-    # دکمه‌های عمومی (همه مدیران)
+    # دکمه‌های عمومی برای همه مدیران
     if is_king_or_owner(user_id) or is_employee(user_id):
         keyboard.append([InlineKeyboardButton("💰 واریز وجه", callback_data=f"admin_add_balance_{user['account_id']}")])
         keyboard.append([InlineKeyboardButton("🧊 بلوکه کردن موجودی", callback_data=f"admin_freeze_balance_{user['account_id']}")])
         keyboard.append([InlineKeyboardButton("📤 برداشت موجودی", callback_data=f"admin_withdraw_balance_{user['account_id']}")])
+        keyboard.append([InlineKeyboardButton("✏️ تغییر توضیحات", callback_data=f"admin_edit_notes_{user['account_id']}")])
     
     # دکمه‌های فقط شاه/مالک
     if is_king_or_owner(user_id):
@@ -1254,7 +1251,8 @@ async def admin_edit_field_start(update: Update, context, field_name, target_id)
         'camelot': 'نام کملوتی',
         'telegram': 'آیدی تلگرام',
         'national': 'کد ملی',
-        'account': 'شماره حساب جدید'
+        'account': 'شماره حساب جدید',
+        'notes': 'توضیحات'
     }
     
     await query.edit_message_text(
@@ -1383,6 +1381,29 @@ async def admin_edit_value(update: Update, context):
         
         await update.message.reply_text(f"✅ شماره حساب با موفقیت به `{text}` تغییر یافت.", parse_mode='Markdown')
     
+    elif field == 'notes':
+        # تغییر توضیحات (برای کارمند و شاه/مالک)
+        c.execute('''
+            SELECT u.telegram_id, a.notes 
+            FROM accounts a
+            JOIN users u ON u.id = a.user_id
+            WHERE a.id = ?
+        ''', (target,))
+        old_user = c.fetchone()
+        
+        c.execute('UPDATE accounts SET notes = ? WHERE id = ?', (text, target))
+        db.commit()
+        db.close()
+        
+        if old_user:
+            await send_message_to_user(
+                context, old_user['telegram_id'],
+                f"📝 **توضیحات حساب شما تغییر کرد**\n\n"
+                f"توضیحات جدید: {text}"
+            )
+        
+        await update.message.reply_text(f"✅ توضیحات با موفقیت به‌روز شد.", parse_mode='Markdown')
+    
     context.user_data.pop('admin_edit_field', None)
     context.user_data.pop('admin_edit_target', None)
     return ConversationHandler.END
@@ -1482,7 +1503,7 @@ async def admin_add_balance_amount(update: Update, context):
     context.user_data.pop('admin_add_balance_account', None)
     return ConversationHandler.END
 
-# ---------- برداشت موجودی (جدید) ----------
+# ---------- برداشت موجودی ----------
 async def admin_withdraw_balance_start(update: Update, context, account_id):
     query = update.callback_query
     await query.answer()
@@ -1508,6 +1529,7 @@ async def admin_withdraw_amount(update: Update, context):
     if text.lower() == '/cancel':
         await update.message.reply_text("❌ برداشت لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
         context.user_data.pop('admin_withdraw_account', None)
+        context.user_data.pop('admin_withdraw_amount', None)
         return ConversationHandler.END
     
     try:
@@ -1532,20 +1554,16 @@ async def admin_withdraw_amount(update: Update, context):
         await update.message.reply_text("❌ حساب یافت نشد.")
         return ConversationHandler.END
     
-    usable_balance = acc['balance'] - acc.get('blocked_balance', 0)
+    usable_balance = acc['balance'] - acc['blocked_balance']
     if amount > usable_balance:
         await update.message.reply_text(f"❌ موجودی قابل استفاده کافی نیست.\nموجودی قابل استفاده: {usable_balance} ART")
         return 'admin_withdraw_amount'
     
-    # دریافت اطلاعات کاربر
-    c.execute('SELECT camelot_name FROM users WHERE id = ?', (acc['user_id'],))
-    user = c.fetchone()
-    user_name = user['camelot_name'] if user else 'کاربر'
-    
-    # دریافت شماره حساب مقصد (از مدیر)
+    # ذخیره اطلاعات در context
     context.user_data['admin_withdraw_amount'] = amount
     context.user_data['admin_withdraw_sender_account'] = acc['account_number']
     context.user_data['admin_withdraw_user_id'] = acc['user_id']
+    context.user_data['admin_withdraw_account_id'] = account_id
     
     await update.message.reply_text(
         "📤 **شماره حساب مقصد را وارد کنید:**\n\n"
@@ -1565,6 +1583,7 @@ async def admin_withdraw_destination(update: Update, context):
         context.user_data.pop('admin_withdraw_amount', None)
         context.user_data.pop('admin_withdraw_sender_account', None)
         context.user_data.pop('admin_withdraw_user_id', None)
+        context.user_data.pop('admin_withdraw_account_id', None)
         return ConversationHandler.END
     
     if len(text) != 6 or not text.isdigit():
@@ -1585,7 +1604,7 @@ async def admin_withdraw_destination(update: Update, context):
         return 'admin_withdraw_destination'
     
     amount = context.user_data.get('admin_withdraw_amount')
-    account_id = context.user_data.get('admin_withdraw_account')
+    account_id = context.user_data.get('admin_withdraw_account_id')
     user_id = context.user_data.get('admin_withdraw_user_id')
     
     if not amount or not account_id or not user_id:
@@ -1632,7 +1651,7 @@ async def admin_withdraw_destination(update: Update, context):
         f"انجام شده توسط: {role_display}"
     )
     
-    # اطلاع‌رسانی به گیرنده (اختیاری)
+    # اطلاع‌رسانی به گیرنده
     dest_user = get_user_by_account_number(dest_account_number)
     if dest_user:
         await send_message_to_user(
@@ -1667,6 +1686,7 @@ async def admin_withdraw_destination(update: Update, context):
     context.user_data.pop('admin_withdraw_amount', None)
     context.user_data.pop('admin_withdraw_sender_account', None)
     context.user_data.pop('admin_withdraw_user_id', None)
+    context.user_data.pop('admin_withdraw_account_id', None)
     return ConversationHandler.END
 
 # ---------- بلوکه موجودی ----------
@@ -1749,7 +1769,6 @@ async def admin_freeze_amount(update: Update, context):
         reply_markup=main_menu_keyboard(get_user_role_display(user_id))
     )
     
-    # لاگ در کانال
     await log_transaction_to_channel(
         context,
         f'🧊 بلوکه موجودی (توسط {role_display})',
@@ -1953,7 +1972,6 @@ async def admin_report_reason(update: Update, context):
         await update.message.reply_text("❌ خطا: شناسه کاربر یافت نشد.")
         return ConversationHandler.END
     
-    # دریافت اطلاعات کاربر مورد گزارش
     db = get_db()
     c = db.cursor()
     c.execute('''
@@ -2000,9 +2018,10 @@ async def admin_report_reason(update: Update, context):
 🕐 **زمان:** {get_jalali_date()}
 """
     
-    # ارسال به شاه و مالک
+    # ارسال به شاه و مالک (با جلوگیری از ارسال تکراری)
+    admin_ids = list({OWNER_ID, KING_ID})  # مجموعه برای حذف تکراری
     sent_to = []
-    for admin_id in [OWNER_ID, KING_ID]:
+    for admin_id in admin_ids:
         try:
             await context.bot.send_message(admin_id, report_message, parse_mode='Markdown')
             sent_to.append(admin_id)
@@ -2169,7 +2188,7 @@ def main():
     )
     app.add_handler(admin_user_conv)
     
-    # تغییر فیلدها (فقط شاه/مالک)
+    # تغییر فیلدها (شاه/مالک)
     admin_edit_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(lambda u,c: admin_edit_field_start(u,c, 'camelot', int(u.callback_query.data.split('_')[3])), pattern="^admin_edit_camelot_"),
@@ -2230,6 +2249,16 @@ def main():
     
     # تغییر نقش (فقط شاه/مالک)
     app.add_handler(CallbackQueryHandler(lambda u,c: admin_change_role(u,c, int(u.callback_query.data.split('_')[3])), pattern="^admin_change_role_"))
+    
+    # تغییر توضیحات (همه مدیران)
+    admin_notes_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(lambda u,c: admin_edit_field_start(u,c, 'notes', int(u.callback_query.data.split('_')[3])), pattern="^admin_edit_notes_")],
+        states={
+            'admin_edit_value': [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_value)],
+        },
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(admin_notes_conv)
     
     # ارسال گزارش به مدیریت (فقط کارمند)
     admin_report_conv = ConversationHandler(
