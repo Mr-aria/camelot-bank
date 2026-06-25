@@ -17,7 +17,7 @@ from database import (
     init_db, get_db, get_user_by_telegram_id, get_account_by_user_id,
     get_account_by_number, get_user_by_account_number, get_setting,
     generate_txid, log_audit, get_user_transactions, get_transaction_details,
-    send_notification
+    send_notification, add_system_log, get_system_logs
 )
 from utils import (
     create_bank_account, format_balance, format_receipt,
@@ -27,6 +27,7 @@ from utils import (
 TEHRAN_TZ = pytz.timezone('Asia/Tehran')
 TRANSACTIONS_PER_PAGE = 10
 USERS_PER_PAGE = 10
+LOGS_PER_PAGE = 15
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
@@ -87,43 +88,26 @@ def get_jalali_date_only():
     jnow = jdatetime.datetime.fromgregorian(datetime=now)
     return jnow.strftime("%Y/%m/%d")
 
+async def log_to_system(log_type, title, content, actor_id=None, target_id=None):
+    """ذخیره لاگ در سیستم (جایگزین کانال تلگرام)"""
+    add_system_log(log_type, title, content, actor_id, target_id)
+
 async def log_to_channel(context, message: str):
-    """ارسال پیام به کانال لاگ با مدیریت خطا"""
-    try:
-        await context.bot.send_message(LOG_CHANNEL_ID, message, parse_mode='Markdown')
-        logger.info(f"✅ پیام به کانال لاگ ارسال شد: {message[:50]}...")
-    except Exception as e:
-        logger.error(f"❌ خطا در ارسال به کانال لاگ: {e}")
+    """ارسال پیام به کانال لاگ (در صورت تمایل، هم‌اکنون فقط در سیستم ذخیره می‌شود)"""
+    # برای جلوگیری از خطا، لاگ را در سیستم ذخیره می‌کنیم
+    await log_to_system('system', 'پیام کانال', message[:200])
 
 async def log_transaction_to_channel(context, tx_type, sender_info, receiver_info, amount, fee=0, reason=None, sender_new_balance=None, receiver_new_balance=None):
-    """ارسال فاکتور کامل تراکنش به کانال لاگ"""
-    try:
-        jalali_date = get_jalali_date()
-        
-        log_message = f"""🏦 **لاگ تراکنش بانک کملوت**
-━━━━━━━━━━━━━━━━━━━
-📋 **نوع تراکنش:** {tx_type}
-💰 **مبلغ:** {amount} ART
-💸 **کارمزد:** {fee} ART
-🕐 **تاریخ:** {jalali_date}
-━━━━━━━━━━━━━━━━━━━
-👤 **فرستنده:** {sender_info}
-👤 **گیرنده:** {receiver_info}"""
-        
-        if reason:
-            log_message += f"\n📝 **توضیحات:** {reason}"
-        
-        if sender_new_balance is not None:
-            log_message += f"\n📊 **موجودی جدید فرستنده:** {sender_new_balance} ART"
-        if receiver_new_balance is not None:
-            log_message += f"\n📊 **موجودی جدید گیرنده:** {receiver_new_balance} ART"
-        
-        log_message += "\n━━━━━━━━━━━━━━━━━━━"
-        
-        await context.bot.send_message(LOG_CHANNEL_ID, log_message, parse_mode='Markdown')
-        logger.info(f"✅ لاگ تراکنش به کانال ارسال شد: {tx_type}")
-    except Exception as e:
-        logger.error(f"❌ خطا در ارسال لاگ تراکنش به کانال: {e}")
+    """ذخیره لاگ تراکنش در سیستم به جای کانال"""
+    content = f"""نوع: {tx_type}
+مبلغ: {amount} ART
+کارمزد: {fee} ART
+فرستنده: {sender_info}
+گیرنده: {receiver_info}
+توضیحات: {reason or 'ندارد'}
+موجودی جدید فرستنده: {sender_new_balance or 'نامشخص'}
+موجودی جدید گیرنده: {receiver_new_balance or 'نامشخص'}"""
+    await log_to_system('transaction', f'تراکنش {tx_type}', content)
 
 async def send_message_to_user(context, user_id: int, text: str):
     try:
@@ -225,7 +209,6 @@ async def my_info_callback(update: Update, context):
 ⭐ امتیاز اعتباری: {acc['credit_score']}
 👑 نقش: {get_user_role_display(user_id)}
 📊 وضعیت: {status_persian}
-📝 توضیحات: {acc['notes'] or 'ندارد'}
 🕐 آخرین به‌روزرسانی: {now_jalali}
 ━━━━━━━━━━━━━━━━━━━"""
     keyboard = InlineKeyboardMarkup([
@@ -318,6 +301,7 @@ async def panel_callback(update: Update, context):
         keyboard.append([InlineKeyboardButton("📣 ارسال پیام همگانی", callback_data="admin_broadcast")])
     
     keyboard.append([InlineKeyboardButton("📨 پیام‌های پشتیبانی", callback_data="admin_support")])
+    keyboard.append([InlineKeyboardButton("📋 لاگ‌های سیستم", callback_data="admin_logs")])
     keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")])
     
     panel_text = f"👑 **پنل مدیریت**\n👤 نقش: {role_persian}\n🕐 {now_jalali}"
@@ -433,10 +417,7 @@ async def confirm_callback(update: Update, context):
                 f"برای ورود به بانک، دوباره /start بزنید.",
                 parse_mode='Markdown'
             )
-            try:
-                await log_to_channel(context, f"🏦 حساب جدید: {camelot_name} | شماره حساب: {acc_num} | نقش: {get_user_role_display(user_id)}")
-            except:
-                pass
+            await log_to_system('system', 'حساب جدید', f'کاربر: {camelot_name} - شماره حساب: {acc_num}', actor_id=user_id)
         except Exception as e:
             logger.error(f"خطا در ساخت حساب: {e}")
             await query.edit_message_text(f"❌ خطا در ساخت حساب: {str(e)}\nلطفاً دوباره /start کنید.")
@@ -570,13 +551,12 @@ async def transfer_password_handler(update: Update, context):
     await send_message_to_user(context, receiver_user['telegram_id'],
                                f"💸 دریافت {amount} ART از {sender_user['camelot_name']}\nموجودی جدید: {new_receiver} ART")
     
-    await log_transaction_to_channel(
-        context,
-        '💸 انتقال وجه',
-        f"{sender_user['camelot_name']} ({sender_acc['account_number']})",
-        f"{receiver_user['camelot_name']} ({receiver_account})",
-        amount, fee, context.user_data.get('transfer_reason'),
-        new_sender, new_receiver
+    await log_to_system(
+        'transaction',
+        f'انتقال وجه - {amount} ART',
+        f'فرستنده: {sender_user["camelot_name"]} ({sender_acc["account_number"]})\nگیرنده: {receiver_user["camelot_name"]} ({receiver_account})\nتوضیحات: {context.user_data.get("transfer_reason") or "ندارد"}',
+        actor_id=user_id,
+        target_id=receiver_user['id']
     )
     
     context.user_data.pop('transfer_step', None)
@@ -765,13 +745,7 @@ async def admin_broadcast_confirm(update: Update, context):
             
             await asyncio.sleep(0.05)
         
-        await log_to_channel(
-            context,
-            f"📣 **پیام همگانی ارسال شد**\n"
-            f"تعداد موفق: {success_count}\n"
-            f"تعداد ناموفق: {fail_count}\n"
-            f"ارسال‌کننده: {get_user_role_display(user_id)}"
-        )
+        await log_to_system('admin_action', 'پیام همگانی ارسال شد', f'تعداد موفق: {success_count} - تعداد ناموفق: {fail_count}', actor_id=user_id)
         
         await query.edit_message_text(
             f"✅ **پیام همگانی با موفقیت ارسال شد!**\n\n"
@@ -857,11 +831,7 @@ async def support_receive(update: Update, context):
         reply_markup=main_menu_keyboard(user['role'])
     )
     
-    await log_to_channel(
-        context,
-        f"🆘 **درخواست پشتیبانی جدید** #{ticket_id}\n"
-        f"از: {user['camelot_name']} ({user['telegram_id']})"
-    )
+    await log_to_system('support', f'تیکت پشتیبانی #{ticket_id}', f'از: {user["camelot_name"]}\nمتن: {text}', actor_id=user['id'])
     
     return ConversationHandler.END
 
@@ -1024,6 +994,8 @@ async def admin_support_reply_receive(update: Update, context):
             f"تیکت #{ticket_id}",
             reply_markup=main_menu_keyboard(get_user_role_display(user_id))
         )
+    
+    await log_to_system('support', f'پاسخ به تیکت #{ticket_id}', f'کاربر: {ticket["camelot_name"]}\nپاسخ: {text}', actor_id=user_id, target_id=ticket['user_id'])
     
     context.user_data.pop('support_ticket_id', None)
     return ConversationHandler.END
@@ -1240,7 +1212,7 @@ async def admin_edit_field_start(update: Update, context, field_name, target_id)
     await query.answer()
     user_id = update.effective_user.id
     
-    if not is_king_or_owner(user_id):
+    if not is_king_or_owner(user_id) and field_name != 'notes':
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
     
@@ -1298,6 +1270,7 @@ async def admin_edit_value(update: Update, context):
                 f"نام قبلی: {old_user['camelot_name']}\n"
                 f"نام جدید: {text}"
             )
+            await log_to_system('admin_action', f'تغییر نام کملوتی کاربر {old_user["camelot_name"]}', f'نام جدید: {text}', actor_id=user_id, target_id=target)
         
         await update.message.reply_text(f"✅ نام کملوتی با موفقیت به `{text}` تغییر یافت.", parse_mode='Markdown')
     
@@ -1320,6 +1293,7 @@ async def admin_edit_value(update: Update, context):
                 f"آیدی جدید: `{text}`",
                 parse_mode='Markdown'
             )
+            await log_to_system('admin_action', f'تغییر آیدی تلگرام کاربر {target}', f'آیدی جدید: {text}', actor_id=user_id, target_id=target)
         
         await update.message.reply_text(f"✅ آیدی تلگرام با موفقیت به `{text}` تغییر یافت.", parse_mode='Markdown')
     
@@ -1346,6 +1320,7 @@ async def admin_edit_value(update: Update, context):
                 f"🆔 **کد ملی شما تغییر کرد**\n\n"
                 f"کد جدید: {text}"
             )
+            await log_to_system('admin_action', f'تغییر کد ملی کاربر {target}', f'کد جدید: {text}', actor_id=user_id, target_id=target)
         
         await update.message.reply_text(f"✅ کد ملی با موفقیت به `{text}` تغییر یافت.", parse_mode='Markdown')
     
@@ -1378,13 +1353,14 @@ async def admin_edit_value(update: Update, context):
                 f"شماره قدیم: {old_user['account_number']}\n"
                 f"شماره جدید: {text}"
             )
+            await log_to_system('admin_action', f'تغییر شماره حساب کاربر {target}', f'شماره جدید: {text}', actor_id=user_id, target_id=target)
         
         await update.message.reply_text(f"✅ شماره حساب با موفقیت به `{text}` تغییر یافت.", parse_mode='Markdown')
     
     elif field == 'notes':
         # تغییر توضیحات (برای کارمند و شاه/مالک)
         c.execute('''
-            SELECT u.telegram_id, a.notes 
+            SELECT u.telegram_id, u.id as user_id, a.notes 
             FROM accounts a
             JOIN users u ON u.id = a.user_id
             WHERE a.id = ?
@@ -1395,12 +1371,8 @@ async def admin_edit_value(update: Update, context):
         db.commit()
         db.close()
         
-        if old_user:
-            await send_message_to_user(
-                context, old_user['telegram_id'],
-                f"📝 **توضیحات حساب شما تغییر کرد**\n\n"
-                f"توضیحات جدید: {text}"
-            )
+        # به کاربر اطلاع داده نمی‌شود (توضیحات مخفی است)
+        await log_to_system('admin_action', f'تغییر توضیحات کاربر {old_user["user_id"]}', f'توضیحات جدید: {text}', actor_id=user_id, target_id=old_user['user_id'])
         
         await update.message.reply_text(f"✅ توضیحات با موفقیت به‌روز شد.", parse_mode='Markdown')
     
@@ -1491,13 +1463,12 @@ async def admin_add_balance_amount(update: Update, context):
         reply_markup=main_menu_keyboard(get_user_role_display(user_id))
     )
     
-    await log_transaction_to_channel(
-        context,
-        f'📥 واریز مدیریتی (توسط {role_display})',
-        f"{role_display}",
-        f"{user_name} ({acc['account_number']})",
-        amount, 0, 'واریز توسط مدیریت',
-        None, new_balance
+    await log_to_system(
+        'admin_action',
+        f'واریز مدیریتی به حساب {user_name}',
+        f'مبلغ: {amount} ART\nتوسط: {role_display}',
+        actor_id=user_id,
+        target_id=acc['user_id']
     )
     
     context.user_data.pop('admin_add_balance_account', None)
@@ -1547,7 +1518,7 @@ async def admin_withdraw_amount(update: Update, context):
     
     db = get_db()
     c = db.cursor()
-    c.execute('SELECT balance, user_id, account_number FROM accounts WHERE id = ?', (account_id,))
+    c.execute('SELECT balance, user_id, account_number, blocked_balance FROM accounts WHERE id = ?', (account_id,))
     acc = c.fetchone()
     if not acc:
         db.close()
@@ -1559,7 +1530,7 @@ async def admin_withdraw_amount(update: Update, context):
         await update.message.reply_text(f"❌ موجودی قابل استفاده کافی نیست.\nموجودی قابل استفاده: {usable_balance} ART")
         return 'admin_withdraw_amount'
     
-    # ذخیره اطلاعات در context
+    # ذخیره اطلاعات
     context.user_data['admin_withdraw_amount'] = amount
     context.user_data['admin_withdraw_sender_account'] = acc['account_number']
     context.user_data['admin_withdraw_user_id'] = acc['user_id']
@@ -1667,19 +1638,18 @@ async def admin_withdraw_destination(update: Update, context):
         reply_markup=main_menu_keyboard(get_user_role_display(update.effective_user.id))
     )
     
-    # لاگ در کانال
+    # لاگ در سیستم
     sender_name = get_user_by_account_number(sender_account)
     sender_name = sender_name['camelot_name'] if sender_name else 'کاربر'
     dest_name = get_user_by_account_number(dest_account_number)
     dest_name = dest_name['camelot_name'] if dest_name else 'کاربر'
     
-    await log_transaction_to_channel(
-        context,
-        f'📤 برداشت مدیریتی (توسط {role_display})',
-        f"{sender_name} ({sender_account})",
-        f"{dest_name} ({dest_account_number})",
-        amount, 0, 'برداشت توسط مدیریت',
-        new_sender_balance, new_receiver_balance
+    await log_to_system(
+        'admin_action',
+        f'برداشت مدیریتی از حساب {sender_name}',
+        f'مبلغ: {amount} ART\nبه حساب: {dest_name} ({dest_account_number})\nتوسط: {role_display}',
+        actor_id=user_id,
+        target_id=user_id
     )
     
     context.user_data.pop('admin_withdraw_account', None)
@@ -1769,13 +1739,12 @@ async def admin_freeze_amount(update: Update, context):
         reply_markup=main_menu_keyboard(get_user_role_display(user_id))
     )
     
-    await log_transaction_to_channel(
-        context,
-        f'🧊 بلوکه موجودی (توسط {role_display})',
-        f"{user_name} ({acc['account_number']})",
-        "خزانه بانک",
-        amount, 0, f'بلوکه توسط {role_display}',
-        acc['balance'], None
+    await log_to_system(
+        'admin_action',
+        f'بلوکه موجودی حساب {user_name}',
+        f'مبلغ: {amount} ART\nتوسط: {role_display}',
+        actor_id=user_id,
+        target_id=acc['user_id']
     )
     
     context.user_data.pop('admin_freeze_account', None)
@@ -1819,6 +1788,8 @@ async def admin_change_status(update: Update, context, account_id):
         reply_markup=main_menu_keyboard(get_user_role_display(user_id)),
         parse_mode='Markdown'
     )
+    
+    await log_to_system('admin_action', f'تغییر وضعیت حساب کاربر', f'وضعیت جدید: {status_names[new_status]}', actor_id=user_id, target_id=acc['user_id'])
 
 # ---------- تغییر امتیاز (فقط شاه/مالک) ----------
 async def admin_change_score_start(update: Update, context, account_id):
@@ -1890,6 +1861,9 @@ async def admin_change_score_value(update: Update, context):
         reply_markup=main_menu_keyboard(get_user_role_display(user_id)),
         parse_mode='Markdown'
     )
+    
+    await log_to_system('admin_action', f'تغییر امتیاز اعتباری کاربر', f'امتیاز جدید: {new_score}', actor_id=user_id, target_id=acc['user_id'])
+    
     context.user_data.pop('admin_score_account', None)
     return ConversationHandler.END
 
@@ -1938,6 +1912,8 @@ async def admin_change_role(update: Update, context, user_id):
         reply_markup=main_menu_keyboard(get_user_role_display(admin_user_id)),
         parse_mode='Markdown'
     )
+    
+    await log_to_system('admin_action', f'تغییر نقش کاربر {user["camelot_name"]}', f'نقش جدید: {role_names[new_role]}', actor_id=admin_user_id, target_id=user_id)
 
 # ---------- ارسال گزارش به مدیریت (فقط کارمند) ----------
 async def admin_report_user(update: Update, context, target_user_id):
@@ -2018,8 +1994,7 @@ async def admin_report_reason(update: Update, context):
 🕐 **زمان:** {get_jalali_date()}
 """
     
-    # ارسال به شاه و مالک (با جلوگیری از ارسال تکراری)
-    admin_ids = list({OWNER_ID, KING_ID})  # مجموعه برای حذف تکراری
+    admin_ids = list({OWNER_ID, KING_ID})
     sent_to = []
     for admin_id in admin_ids:
         try:
@@ -2034,13 +2009,7 @@ async def admin_report_reason(update: Update, context):
             f"کاربر: {target['camelot_name']}",
             reply_markup=main_menu_keyboard(get_user_role_display(user_id))
         )
-        await log_to_channel(
-            context,
-            f"📨 **گزارش جدید از کارمند**\n"
-            f"کارمند: {reporter['camelot_name']}\n"
-            f"کاربر: {target['camelot_name']}\n"
-            f"دلیل: {text}"
-        )
+        await log_to_system('report', f'گزارش کارمند درباره {target["camelot_name"]}', f'دلیل: {text}', actor_id=user_id, target_id=target_user_id)
     else:
         await update.message.reply_text(
             "❌ ارسال گزارش با مشکل مواجه شد. لطفاً بعداً تلاش کنید.",
@@ -2049,6 +2018,102 @@ async def admin_report_reason(update: Update, context):
     
     context.user_data.pop('admin_report_target', None)
     return ConversationHandler.END
+
+# ---------- لاگ‌های سیستم ----------
+async def admin_logs_list(update: Update, context, page=0, log_type=None):
+    """نمایش لیست لاگ‌های سیستم با صفحه‌بندی"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    offset = page * LOGS_PER_PAGE
+    logs, total = get_system_logs(LOGS_PER_PAGE, offset, log_type)
+    
+    if not logs:
+        await query.edit_message_text(
+            "📭 **هیچ لاگی در سیستم ثبت نشده است.**",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_panel")]])
+        )
+        return
+    
+    text = f"📋 **لاگ‌های سیستم**\n━━━━━━━━━━━━━━━━━━━\n"
+    text += f"تعداد کل: {total} | صفحه {page+1}\n━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    for log in logs:
+        created = datetime.strptime(log['created_at'], '%Y-%m-%d %H:%M:%S')
+        jcreated = jdatetime.datetime.fromgregorian(datetime=created)
+        date_str = jcreated.strftime('%Y/%m/%d - %H:%M')
+        
+        log_type_emoji = {
+            'transaction': '💸',
+            'admin_action': '⚙️',
+            'support': '🆘',
+            'report': '📨',
+            'error': '❌',
+            'system': '🔧'
+        }.get(log['log_type'], '📌')
+        
+        actor = log['actor_name'] or 'سیستم'
+        target = log['target_name'] or '-'
+        
+        text += f"{log_type_emoji} **{log['title']}**\n"
+        text += f"📝 {log['content'][:100]}{'...' if len(log['content']) > 100 else ''}\n"
+        text += f"👤 {actor} → {target}\n"
+        text += f"🕐 {date_str}\n━━━━━━━━━━━━━━━━━━━\n"
+    
+    keyboard = []
+    nav_buttons = []
+    total_pages = (total + LOGS_PER_PAGE - 1) // LOGS_PER_PAGE
+    
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"admin_logs_page_{log_type or 'all'}_{page-1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("➡️ بعدی", callback_data=f"admin_logs_page_{log_type or 'all'}_{page+1}"))
+    
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    filter_buttons = [
+        ("💸 تراکنش", "transaction"),
+        ("⚙️ مدیریت", "admin_action"),
+        ("🆘 پشتیبانی", "support"),
+        ("📨 گزارش", "report"),
+        ("🔧 سیستم", "system")
+    ]
+    filter_row = []
+    for label, value in filter_buttons:
+        if log_type == value:
+            label = f"✅ {label}"
+        filter_row.append(InlineKeyboardButton(label, callback_data=f"admin_logs_filter_{value}"))
+    keyboard.append(filter_row)
+    keyboard.append([InlineKeyboardButton("📋 همه لاگ‌ها", callback_data="admin_logs_filter_all")])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="back_to_panel")])
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def admin_logs_page_handler(update: Update, context):
+    query = update.callback_query
+    data = query.data
+    parts = data.split('_')
+    log_type = parts[3] if parts[3] != 'all' else None
+    page = int(parts[4])
+    await admin_logs_list(update, context, page, log_type)
+
+async def admin_logs_filter_handler(update: Update, context):
+    query = update.callback_query
+    data = query.data
+    log_type = data.replace('admin_logs_filter_', '')
+    if log_type == 'all':
+        log_type = None
+    await admin_logs_list(update, context, 0, log_type)
 
 # ---------- صندوق پیام ----------
 async def notifications_menu(update: Update, context):
@@ -2188,13 +2253,14 @@ def main():
     )
     app.add_handler(admin_user_conv)
     
-    # تغییر فیلدها (شاه/مالک)
+    # تغییر فیلدها (شاه/مالک) + توضیحات (همه مدیران)
     admin_edit_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(lambda u,c: admin_edit_field_start(u,c, 'camelot', int(u.callback_query.data.split('_')[3])), pattern="^admin_edit_camelot_"),
             CallbackQueryHandler(lambda u,c: admin_edit_field_start(u,c, 'telegram', int(u.callback_query.data.split('_')[3])), pattern="^admin_edit_telegram_"),
             CallbackQueryHandler(lambda u,c: admin_edit_field_start(u,c, 'national', int(u.callback_query.data.split('_')[3])), pattern="^admin_edit_national_"),
             CallbackQueryHandler(lambda u,c: admin_edit_field_start(u,c, 'account', int(u.callback_query.data.split('_')[3])), pattern="^admin_edit_account_"),
+            CallbackQueryHandler(lambda u,c: admin_edit_field_start(u,c, 'notes', int(u.callback_query.data.split('_')[3])), pattern="^admin_edit_notes_"),
         ],
         states={
             'admin_edit_value': [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_value)],
@@ -2250,16 +2316,6 @@ def main():
     # تغییر نقش (فقط شاه/مالک)
     app.add_handler(CallbackQueryHandler(lambda u,c: admin_change_role(u,c, int(u.callback_query.data.split('_')[3])), pattern="^admin_change_role_"))
     
-    # تغییر توضیحات (همه مدیران)
-    admin_notes_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(lambda u,c: admin_edit_field_start(u,c, 'notes', int(u.callback_query.data.split('_')[3])), pattern="^admin_edit_notes_")],
-        states={
-            'admin_edit_value': [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_value)],
-        },
-        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
-    )
-    app.add_handler(admin_notes_conv)
-    
     # ارسال گزارش به مدیریت (فقط کارمند)
     admin_report_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(lambda u,c: admin_report_user(u,c, int(u.callback_query.data.split('_')[3])), pattern="^admin_report_user_")],
@@ -2269,6 +2325,11 @@ def main():
         fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
     )
     app.add_handler(admin_report_conv)
+    
+    # لاگ‌های سیستم
+    app.add_handler(CallbackQueryHandler(admin_logs_list, pattern="^admin_logs$"))
+    app.add_handler(CallbackQueryHandler(admin_logs_page_handler, pattern="^admin_logs_page_"))
+    app.add_handler(CallbackQueryHandler(admin_logs_filter_handler, pattern="^admin_logs_filter_"))
     
     # دستورات اصلی
     app.add_handler(CommandHandler("start", start))
