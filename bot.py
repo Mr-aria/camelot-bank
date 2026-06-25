@@ -243,6 +243,10 @@ async def restore_account_callback(update: Update, context):
     if not is_owner(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
+    
+    # پاک کردن داده‌های قبلی برای جلوگیری از تداخل
+    context.user_data.clear()
+    
     await query.edit_message_text(
         "📤 **بازیابی اطلاعات از فایل بکاپ**\n\n"
         "⚠️ **هشدار مهم:**\n"
@@ -296,6 +300,7 @@ async def restore_from_backup_file(update: Update, context):
             f"❌ خطا در دریافت فایل: {str(e)}",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]])
         )
+        context.user_data.clear()
         return ConversationHandler.END
 
 async def restore_confirm_callback(update: Update, context):
@@ -305,10 +310,12 @@ async def restore_confirm_callback(update: Update, context):
     if not is_owner(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
+    
     json_data = context.user_data.get('backup_json_data')
     if not json_data:
-        await query.edit_message_text("❌ خطا: داده‌های پشتیبان یافت نشد.")
+        await query.edit_message_text("❌ خطا: داده‌های پشتیبان یافت نشد. لطفاً دوباره از ابتدا شروع کنید.")
         return
+    
     await query.edit_message_text("🔄 در حال بازیابی اطلاعات... لطفاً صبر کنید.", parse_mode='Markdown')
     try:
         success, message = import_full_backup(json_data)
@@ -332,7 +339,8 @@ async def restore_confirm_callback(update: Update, context):
             f"❌ خطا در بازیابی: {str(e)}",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]])
         )
-    context.user_data.pop('backup_json_data', None)
+    # پاک کردن کامل داده‌های موقت
+    context.user_data.clear()
 
 async def restart_bot_callback(update: Update, context):
     query = update.callback_query
@@ -347,6 +355,8 @@ async def restart_bot_callback(update: Update, context):
         parse_mode='Markdown'
     )
     await log_to_system('system', 'ری‌استارت ربات', f'توسط: {get_user_role_display(user_id)}', actor_id=user_id)
+    # پاک کردن کامل داده‌ها
+    context.user_data.clear()
 
 # ==================== ثبت‌نام ====================
 async def register_handler(update: Update, context):
