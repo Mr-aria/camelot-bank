@@ -172,6 +172,19 @@ def init_db():
         FOREIGN KEY (user_id) REFERENCES users(id)
     )''')
     
+    # 15. system_logs (جدول جدید برای ذخیره همه لاگ‌ها)
+    c.execute('''CREATE TABLE IF NOT EXISTS system_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        log_type TEXT,
+        title TEXT,
+        content TEXT,
+        actor_id INTEGER,
+        target_id INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (actor_id) REFERENCES users(id),
+        FOREIGN KEY (target_id) REFERENCES users(id)
+    )''')
+    
     # تنظیمات پیش‌فرض عمومی
     default_settings = [
         ('registration_bonus', '100'),
@@ -184,7 +197,6 @@ def init_db():
     for key, value in default_settings:
         c.execute('INSERT OR IGNORE INTO system_settings (key, value) VALUES (?, ?)', (key, value))
     
-    # تنظیمات پیش‌فرض وام
     loan_default_settings = [
         ('loan_min_amount', '1000'),
         ('loan_max_amount', '1000000'),
@@ -270,6 +282,50 @@ def log_audit(actor_id, action, target=None, details=None):
               (actor_id, action, target, details))
     conn.commit()
     conn.close()
+
+# ---------- توابع سیستمی جدید ----------
+def add_system_log(log_type, title, content, actor_id=None, target_id=None):
+    """ذخیره یک لاگ در سیستم"""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO system_logs (log_type, title, content, actor_id, target_id)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (log_type, title, content, actor_id, target_id))
+    conn.commit()
+    conn.close()
+
+def get_system_logs(limit=50, offset=0, log_type=None):
+    """دریافت لاگ‌های سیستم با صفحه‌بندی"""
+    conn = get_db()
+    c = conn.cursor()
+    query = '''
+        SELECT sl.*, 
+               u1.camelot_name as actor_name, 
+               u2.camelot_name as target_name
+        FROM system_logs sl
+        LEFT JOIN users u1 ON sl.actor_id = u1.id
+        LEFT JOIN users u2 ON sl.target_id = u2.id
+    '''
+    params = []
+    if log_type:
+        query += ' WHERE sl.log_type = ?'
+        params.append(log_type)
+    query += ' ORDER BY sl.created_at DESC LIMIT ? OFFSET ?'
+    params.extend([limit, offset])
+    c.execute(query, params)
+    logs = c.fetchall()
+    
+    # دریافت تعداد کل
+    count_query = 'SELECT COUNT(*) FROM system_logs'
+    if log_type:
+        count_query += ' WHERE log_type = ?'
+        c.execute(count_query, (log_type,))
+    else:
+        c.execute(count_query)
+    total = c.fetchone()[0]
+    conn.close()
+    return logs, total
 
 # ---------- توابع دریافت اطلاعات ----------
 def get_user_by_telegram_id(telegram_id):
@@ -418,7 +474,6 @@ def apply_loan_penalties(loan_id):
 
 # ---------- توابع تراکنش ----------
 def get_user_transactions(user_id, limit=20, offset=0, tx_type=None):
-    """دریافت تراکنش‌های کاربر با صفحه‌بندی و فیلتر نوع"""
     conn = get_db()
     c = conn.cursor()
     
