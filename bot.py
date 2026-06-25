@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import pytz
 import jdatetime
 import asyncio
+import io
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ConversationHandler
 import os
@@ -17,7 +18,8 @@ from database import (
     init_db, get_db, get_user_by_telegram_id, get_account_by_user_id,
     get_account_by_number, get_user_by_account_number, get_setting,
     generate_txid, log_audit, get_user_transactions, get_transaction_details,
-    send_notification, add_system_log, get_system_logs
+    send_notification, add_system_log, get_system_logs,
+    export_full_backup, import_full_backup
 )
 from utils import (
     create_bank_account, format_balance, format_receipt,
@@ -89,16 +91,12 @@ def get_jalali_date_only():
     return jnow.strftime("%Y/%m/%d")
 
 async def log_to_system(log_type, title, content, actor_id=None, target_id=None):
-    """ذخیره لاگ در سیستم (جایگزین کانال تلگرام)"""
     add_system_log(log_type, title, content, actor_id, target_id)
 
 async def log_to_channel(context, message: str):
-    """ارسال پیام به کانال لاگ (در صورت تمایل، هم‌اکنون فقط در سیستم ذخیره می‌شود)"""
-    # برای جلوگیری از خطا، لاگ را در سیستم ذخیره می‌کنیم
     await log_to_system('system', 'پیام کانال', message[:200])
 
 async def log_transaction_to_channel(context, tx_type, sender_info, receiver_info, amount, fee=0, reason=None, sender_new_balance=None, receiver_new_balance=None):
-    """ذخیره لاگ تراکنش در سیستم به جای کانال"""
     content = f"""نوع: {tx_type}
 مبلغ: {amount} ART
 کارمزد: {fee} ART
@@ -302,6 +300,11 @@ async def panel_callback(update: Update, context):
     
     keyboard.append([InlineKeyboardButton("📨 پیام‌های پشتیبانی", callback_data="admin_support")])
     keyboard.append([InlineKeyboardButton("📋 لاگ‌های سیستم", callback_data="admin_logs")])
+    
+    # فقط مالک
+    if user['role'] == 'owner':
+        keyboard.append([InlineKeyboardButton("💾 پشتیبان‌گیری و بازیابی", callback_data="admin_backup")])
+    
     keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")])
     
     panel_text = f"👑 **پنل مدیریت**\n👤 نقش: {role_persian}\n🕐 {now_jalali}"
@@ -1358,7 +1361,6 @@ async def admin_edit_value(update: Update, context):
         await update.message.reply_text(f"✅ شماره حساب با موفقیت به `{text}` تغییر یافت.", parse_mode='Markdown')
     
     elif field == 'notes':
-        # تغییر توضیحات (برای کارمند و شاه/مالک)
         c.execute('''
             SELECT u.telegram_id, u.id as user_id, a.notes 
             FROM accounts a
@@ -1371,7 +1373,6 @@ async def admin_edit_value(update: Update, context):
         db.commit()
         db.close()
         
-        # به کاربر اطلاع داده نمی‌شود (توضیحات مخفی است)
         await log_to_system('admin_action', f'تغییر توضیحات کاربر {old_user["user_id"]}', f'توضیحات جدید: {text}', actor_id=user_id, target_id=old_user['user_id'])
         
         await update.message.reply_text(f"✅ توضیحات با موفقیت به‌روز شد.", parse_mode='Markdown')
@@ -1530,7 +1531,6 @@ async def admin_withdraw_amount(update: Update, context):
         await update.message.reply_text(f"❌ موجودی قابل استفاده کافی نیست.\nموجودی قابل استفاده: {usable_balance} ART")
         return 'admin_withdraw_amount'
     
-    # ذخیره اطلاعات
     context.user_data['admin_withdraw_amount'] = amount
     context.user_data['admin_withdraw_sender_account'] = acc['account_number']
     context.user_data['admin_withdraw_user_id'] = acc['user_id']
@@ -1568,7 +1568,6 @@ async def admin_withdraw_destination(update: Update, context):
         await update.message.reply_text("❌ نمی‌توانید به همان حساب انتقال دهید.")
         return 'admin_withdraw_destination'
     
-    # بررسی وجود حساب مقصد
     dest_acc = get_account_by_number(dest_account_number)
     if not dest_acc:
         await update.message.reply_text("❌ شماره حساب مقصد یافت نشد. دوباره وارد کنید:")
@@ -1582,23 +1581,19 @@ async def admin_withdraw_destination(update: Update, context):
         await update.message.reply_text("❌ خطا: اطلاعات ناقص.")
         return ConversationHandler.END
     
-    # انجام انتقال
     db = get_db()
     c = db.cursor()
     
-    # کسر از حساب مبدأ
     c.execute('SELECT balance FROM accounts WHERE id = ?', (account_id,))
     sender = c.fetchone()
     new_sender_balance = sender['balance'] - amount
     c.execute('UPDATE accounts SET balance = ? WHERE id = ?', (new_sender_balance, account_id))
     
-    # واریز به حساب مقصد
     c.execute('SELECT balance FROM accounts WHERE account_number = ?', (dest_account_number,))
     receiver = c.fetchone()
     new_receiver_balance = receiver['balance'] + amount
     c.execute('UPDATE accounts SET balance = ? WHERE account_number = ?', (new_receiver_balance, dest_account_number))
     
-    # ثبت تراکنش
     txid = generate_txid()
     c.execute('''
         INSERT INTO transactions (txid, sender_account, receiver_account, amount, type, reason)
@@ -1612,7 +1607,6 @@ async def admin_withdraw_destination(update: Update, context):
     
     role_display = get_user_role_display(update.effective_user.id)
     
-    # اطلاع‌رسانی به کاربر
     await send_message_to_user(
         context, user_id,
         f"📤 **برداشت مدیریتی از حساب شما**\n\n"
@@ -1622,7 +1616,6 @@ async def admin_withdraw_destination(update: Update, context):
         f"انجام شده توسط: {role_display}"
     )
     
-    # اطلاع‌رسانی به گیرنده
     dest_user = get_user_by_account_number(dest_account_number)
     if dest_user:
         await send_message_to_user(
@@ -1638,7 +1631,6 @@ async def admin_withdraw_destination(update: Update, context):
         reply_markup=main_menu_keyboard(get_user_role_display(update.effective_user.id))
     )
     
-    # لاگ در سیستم
     sender_name = get_user_by_account_number(sender_account)
     sender_name = sender_name['camelot_name'] if sender_name else 'کاربر'
     dest_name = get_user_by_account_number(dest_account_number)
@@ -2021,7 +2013,6 @@ async def admin_report_reason(update: Update, context):
 
 # ---------- لاگ‌های سیستم ----------
 async def admin_logs_list(update: Update, context, page=0, log_type=None):
-    """نمایش لیست لاگ‌های سیستم با صفحه‌بندی"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -2114,6 +2105,195 @@ async def admin_logs_filter_handler(update: Update, context):
     if log_type == 'all':
         log_type = None
     await admin_logs_list(update, context, 0, log_type)
+
+# ---------- پشتیبان‌گیری و بازیابی (فقط مالک) ----------
+async def admin_backup_menu(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    user = get_user_by_telegram_id(user_id)
+    
+    if not user or user['role'] != 'owner':
+        await query.edit_message_text("⛔ دسترسی ندارید. این بخش فقط برای مالک است.")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("📥 گرفتن پشتیبان", callback_data="admin_backup_export")],
+        [InlineKeyboardButton("📤 بازیابی از پشتیبان", callback_data="admin_backup_import")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_panel")]
+    ]
+    await query.edit_message_text(
+        "💾 **پشتیبان‌گیری و بازیابی**\n\n"
+        "• **گرفتن پشتیبان:** یک فایل JSON کامل از تمام اطلاعات بانک تهیه می‌شود.\n"
+        "• **بازیابی:** با ارسال فایل پشتیبان، اطلاعات قبلی بازگردانده می‌شود.\n\n"
+        "⚠️ **هشدار:** بازیابی تمام اطلاعات فعلی را بازنویسی می‌کند!",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def admin_backup_export(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    user = get_user_by_telegram_id(user_id)
+    
+    if not user or user['role'] != 'owner':
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    await query.edit_message_text("📥 در حال تهیه پشتیبان... لطفاً صبر کنید.", parse_mode='Markdown')
+    
+    try:
+        json_data = export_full_backup()
+        
+        file_obj = io.BytesIO(json_data.encode('utf-8'))
+        file_obj.name = f"camelot_backup_{datetime.now(TEHRAN_TZ).strftime('%Y%m%d_%H%M%S')}.json"
+        
+        await context.bot.send_document(
+            chat_id=user_id,
+            document=file_obj,
+            caption="💾 **پشتیبان بانک کملوت**\n\n"
+                    f"🕐 تاریخ: {get_jalali_date()}\n"
+                    "📌 این فایل شامل تمام اطلاعات بانک است.\n"
+                    "برای بازیابی، از بخش «بازیابی از پشتیبان» استفاده کنید.",
+            parse_mode='Markdown'
+        )
+        
+        await log_to_system('admin_action', 'پشتیبان‌گیری', f'توسط: {user["camelot_name"]}', actor_id=user_id)
+        
+        await query.edit_message_text(
+            "✅ **پشتیبان با موفقیت تهیه و ارسال شد.**\n\n"
+            "فایل JSON را در جای امن نگهداری کنید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="admin_backup")]]),
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        logger.error(f"خطا در تهیه پشتیبان: {e}")
+        await query.edit_message_text(
+            f"❌ خطا در تهیه پشتیبان: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+        )
+
+async def admin_backup_import_start(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    user = get_user_by_telegram_id(user_id)
+    
+    if not user or user['role'] != 'owner':
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    await query.edit_message_text(
+        "📤 **بازیابی از پشتیبان**\n\n"
+        "⚠️ **هشدار مهم:**\n"
+        "• این عملیات **تمام اطلاعات فعلی** بانک را بازنویسی می‌کند.\n"
+        "• قبل از ادامه، حتماً یک پشتیبان جدید بگیرید.\n"
+        "• فقط فایل‌های JSON معتبر که توسط ربات تولید شده‌اند قابل قبول هستند.\n\n"
+        "لطفاً فایل پشتیبان (JSON) را ارسال کنید.\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_backup_import_file'
+
+async def admin_backup_import_file(update: Update, context):
+    user_id = update.effective_user.id
+    user = get_user_by_telegram_id(user_id)
+    
+    if not user or user['role'] != 'owner':
+        await update.message.reply_text("⛔ دسترسی ندارید.")
+        return ConversationHandler.END
+    
+    document = update.message.document
+    if not document:
+        await update.message.reply_text(
+            "❌ لطفاً یک فایل ارسال کنید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+        )
+        return 'admin_backup_import_file'
+    
+    if not document.file_name.endswith('.json'):
+        await update.message.reply_text(
+            "❌ فقط فایل‌های JSON معتبر هستند.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+        )
+        return 'admin_backup_import_file'
+    
+    await update.message.reply_text("📥 در حال دریافت فایل...", parse_mode='Markdown')
+    
+    try:
+        file = await context.bot.get_file(document.file_id)
+        file_content = await file.download_as_bytearray()
+        json_data = file_content.decode('utf-8')
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ بله، بازیابی کن", callback_data="admin_backup_import_confirm")],
+            [InlineKeyboardButton("❌ لغو", callback_data="admin_backup")]
+        ])
+        await update.message.reply_text(
+            "⚠️ **تأیید نهایی بازیابی**\n\n"
+            "آیا از بازنویسی کامل اطلاعات مطمئن هستید؟\n"
+            "این عملیات قابل بازگشت نیست!",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+        
+        context.user_data['backup_json_data'] = json_data
+        
+    except Exception as e:
+        logger.error(f"خطا در دریافت فایل پشتیبان: {e}")
+        await update.message.reply_text(
+            f"❌ خطا در دریافت فایل: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+        )
+    
+    return ConversationHandler.END
+
+async def admin_backup_import_confirm(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    user = get_user_by_telegram_id(user_id)
+    
+    if not user or user['role'] != 'owner':
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    json_data = context.user_data.get('backup_json_data')
+    if not json_data:
+        await query.edit_message_text("❌ خطا: داده‌های پشتیبان یافت نشد.")
+        return
+    
+    await query.edit_message_text("🔄 در حال بازیابی اطلاعات... لطفاً صبر کنید.", parse_mode='Markdown')
+    
+    try:
+        success, message = import_full_backup(json_data)
+        
+        if success:
+            await log_to_system('admin_action', 'بازیابی اطلاعات', f'توسط: {user["camelot_name"]}', actor_id=user_id)
+            
+            await query.edit_message_text(
+                "✅ **بازیابی با موفقیت انجام شد!**\n\n"
+                "تمام اطلاعات بانک به نسخه پشتیبان بازگردانده شد.\n"
+                "لطفاً ربات را ری‌استارت کنید تا تغییرات اعمال شوند.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="back_to_panel")]]),
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ **خطا در بازیابی:**\n{message}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+            )
+            
+    except Exception as e:
+        logger.error(f"خطا در بازیابی: {e}")
+        await query.edit_message_text(
+            f"❌ خطا در بازیابی: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+        )
+    
+    context.user_data.pop('backup_json_data', None)
 
 # ---------- صندوق پیام ----------
 async def notifications_menu(update: Update, context):
@@ -2253,7 +2433,7 @@ def main():
     )
     app.add_handler(admin_user_conv)
     
-    # تغییر فیلدها (شاه/مالک) + توضیحات (همه مدیران)
+    # تغییر فیلدها
     admin_edit_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(lambda u,c: admin_edit_field_start(u,c, 'camelot', int(u.callback_query.data.split('_')[3])), pattern="^admin_edit_camelot_"),
@@ -2269,7 +2449,7 @@ def main():
     )
     app.add_handler(admin_edit_conv)
     
-    # واریز وجه (همه مدیران)
+    # واریز وجه
     admin_add_balance_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(lambda u,c: admin_add_balance_start(u,c, int(u.callback_query.data.split('_')[3])), pattern="^admin_add_balance_")],
         states={
@@ -2279,7 +2459,7 @@ def main():
     )
     app.add_handler(admin_add_balance_conv)
     
-    # برداشت موجودی (همه مدیران)
+    # برداشت موجودی
     admin_withdraw_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(lambda u,c: admin_withdraw_balance_start(u,c, int(u.callback_query.data.split('_')[3])), pattern="^admin_withdraw_balance_")],
         states={
@@ -2290,7 +2470,7 @@ def main():
     )
     app.add_handler(admin_withdraw_conv)
     
-    # بلوکه موجودی (همه مدیران)
+    # بلوکه موجودی
     admin_freeze_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(lambda u,c: admin_freeze_balance_start(u,c, int(u.callback_query.data.split('_')[3])), pattern="^admin_freeze_balance_")],
         states={
@@ -2300,10 +2480,10 @@ def main():
     )
     app.add_handler(admin_freeze_conv)
     
-    # تغییر وضعیت حساب (فقط شاه/مالک)
+    # تغییر وضعیت حساب
     app.add_handler(CallbackQueryHandler(lambda u,c: admin_change_status(u,c, int(u.callback_query.data.split('_')[3])), pattern="^admin_change_status_"))
     
-    # تغییر امتیاز (فقط شاه/مالک)
+    # تغییر امتیاز
     admin_score_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(lambda u,c: admin_change_score_start(u,c, int(u.callback_query.data.split('_')[3])), pattern="^admin_change_score_")],
         states={
@@ -2313,10 +2493,10 @@ def main():
     )
     app.add_handler(admin_score_conv)
     
-    # تغییر نقش (فقط شاه/مالک)
+    # تغییر نقش
     app.add_handler(CallbackQueryHandler(lambda u,c: admin_change_role(u,c, int(u.callback_query.data.split('_')[3])), pattern="^admin_change_role_"))
     
-    # ارسال گزارش به مدیریت (فقط کارمند)
+    # ارسال گزارش
     admin_report_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(lambda u,c: admin_report_user(u,c, int(u.callback_query.data.split('_')[3])), pattern="^admin_report_user_")],
         states={
@@ -2330,6 +2510,20 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_logs_list, pattern="^admin_logs$"))
     app.add_handler(CallbackQueryHandler(admin_logs_page_handler, pattern="^admin_logs_page_"))
     app.add_handler(CallbackQueryHandler(admin_logs_filter_handler, pattern="^admin_logs_filter_"))
+    
+    # پشتیبان‌گیری و بازیابی (فقط مالک)
+    app.add_handler(CallbackQueryHandler(admin_backup_menu, pattern="^admin_backup$"))
+    app.add_handler(CallbackQueryHandler(admin_backup_export, pattern="^admin_backup_export$"))
+    
+    backup_import_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_backup_import_start, pattern="^admin_backup_import$")],
+        states={
+            'admin_backup_import_file': [MessageHandler(filters.Document.ALL, admin_backup_import_file)],
+        },
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(backup_import_conv)
+    app.add_handler(CallbackQueryHandler(admin_backup_import_confirm, pattern="^admin_backup_import_confirm$"))
     
     # دستورات اصلی
     app.add_handler(CommandHandler("start", start))
