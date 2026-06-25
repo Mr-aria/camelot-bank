@@ -26,6 +26,7 @@ from utils import (
 
 TEHRAN_TZ = pytz.timezone('Asia/Tehran')
 TRANSACTIONS_PER_PAGE = 10
+USERS_PER_PAGE = 10
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                     level=logging.INFO)
@@ -261,9 +262,6 @@ async def panel_callback(update: Update, context):
     panel_text = f"👑 **پنل مدیریت**\n👤 نقش: {role_persian}\n🕐 {now_jalali}"
     keyboard = [
         [InlineKeyboardButton("👥 مدیریت کاربران", callback_data="admin_users")],
-        [InlineKeyboardButton("💰 مدیریت مالی", callback_data="admin_finance")],
-        [InlineKeyboardButton("🏦 مدیریت خزانه", callback_data="admin_treasury")],
-        [InlineKeyboardButton("📨 درخواست‌های pending", callback_data="admin_requests")],
         [InlineKeyboardButton("📣 ارسال پیام همگانی", callback_data="admin_broadcast")],
         [InlineKeyboardButton("📨 پیام‌های پشتیبانی", callback_data="admin_support")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]
@@ -762,7 +760,6 @@ async def support_receive(update: Update, context):
     acc = get_account_by_user_id(user['id'])
     account_number = acc['account_number'] if acc else 'ندارد'
     
-    # ذخیره در دیتابیس
     db = get_db()
     c = db.cursor()
     c.execute('''
@@ -773,7 +770,6 @@ async def support_receive(update: Update, context):
     db.commit()
     db.close()
     
-    # ارسال به مالک (فقط یک بار)
     admin_message = f"""🆘 **پیام جدید پشتیبانی** (تیکت #{ticket_id})
 
 👤 کاربر: {user['real_name']} ({user['camelot_name']})
@@ -792,13 +788,11 @@ async def support_receive(update: Update, context):
     except Exception as e:
         logger.error(f"خطا در ارسال پیام پشتیبانی به مالک: {e}")
     
-    # پاسخ به کاربر
     await update.message.reply_text(
         "✅ پیام شما ارسال شد.",
         reply_markup=main_menu_keyboard(user['role'])
     )
     
-    # لاگ در کانال
     await log_to_channel(
         context,
         f"🆘 **درخواست پشتیبانی جدید** #{ticket_id}\n"
@@ -807,9 +801,8 @@ async def support_receive(update: Update, context):
     
     return ConversationHandler.END
 
-# ---------- مدیریت پشتیبانی (برای مدیران) ----------
+# ---------- مدیریت پشتیبانی ----------
 async def admin_support_list(update: Update, context):
-    """نمایش لیست تیکت‌های پشتیبانی"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -859,7 +852,6 @@ async def admin_support_list(update: Update, context):
     )
 
 async def admin_support_reply_start(update: Update, context):
-    """شروع پاسخ به یک تیکت"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
@@ -871,7 +863,6 @@ async def admin_support_reply_start(update: Update, context):
     ticket_id = int(query.data.split('_')[2])
     context.user_data['support_ticket_id'] = ticket_id
     
-    # دریافت اطلاعات تیکت
     db = get_db()
     c = db.cursor()
     c.execute('''
@@ -906,7 +897,6 @@ async def admin_support_reply_start(update: Update, context):
     return ADMIN_SUPPORT_REPLY
 
 async def admin_support_reply_receive(update: Update, context):
-    """دریافت پاسخ از مدیر و ارسال به کاربر"""
     text = update.message.text
     user_id = update.effective_user.id
     ticket_id = context.user_data.get('support_ticket_id')
@@ -920,7 +910,6 @@ async def admin_support_reply_receive(update: Update, context):
         await update.message.reply_text("❌ خطا: شناسه تیکت یافت نشد.")
         return ConversationHandler.END
     
-    # دریافت اطلاعات تیکت
     db = get_db()
     c = db.cursor()
     c.execute('''
@@ -936,7 +925,6 @@ async def admin_support_reply_receive(update: Update, context):
         await update.message.reply_text("❌ تیکت یافت نشد.")
         return ConversationHandler.END
     
-    # ارسال پاسخ به کاربر
     try:
         await context.bot.send_message(
             ticket['telegram_id'],
@@ -950,7 +938,6 @@ async def admin_support_reply_receive(update: Update, context):
         logger.error(f"خطا در ارسال پاسخ به کاربر {ticket['telegram_id']}: {e}")
         user_received = False
     
-    # به‌روزرسانی دیتابیس
     c.execute('''
         UPDATE support_tickets 
         SET reply = ?, status = 'replied', replied_at = CURRENT_TIMESTAMP 
@@ -976,6 +963,559 @@ async def admin_support_reply_receive(update: Update, context):
     
     context.user_data.pop('support_ticket_id', None)
     return ConversationHandler.END
+
+# ---------- مدیریت کاربران (جدید) ----------
+async def admin_users_list(update: Update, context, page=0):
+    """نمایش لیست کاربران با صفحه‌بندی"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    db = get_db()
+    c = db.cursor()
+    
+    c.execute('SELECT COUNT(*) FROM users')
+    total_users = c.fetchone()[0]
+    
+    if total_users == 0:
+        db.close()
+        await query.edit_message_text(
+            "📭 **هیچ کاربری در بانک ثبت‌نام نکرده است.**",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_panel")]])
+        )
+        return
+    
+    offset = page * USERS_PER_PAGE
+    c.execute('''
+        SELECT u.id, u.telegram_id, u.real_name, u.camelot_name, u.national_id, u.role, u.created_at,
+               a.account_number, a.balance, a.blocked_balance, a.credit_score, a.status
+        FROM users u
+        JOIN accounts a ON u.id = a.user_id
+        ORDER BY u.created_at DESC
+        LIMIT ? OFFSET ?
+    ''', (USERS_PER_PAGE, offset))
+    users = c.fetchall()
+    db.close()
+    
+    text = f"👥 **لیست کاربران بانک کملوت**\n━━━━━━━━━━━━━━━━━━━\n"
+    text += f"تعداد کل: {total_users} کاربر | صفحه {page+1}\n━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    for idx, u in enumerate(users, start=offset+1):
+        role_names = {'citizen':'شهروند', 'employee':'کارمند', 'king':'شاه', 'owner':'مالک'}
+        role_persian = role_names.get(u['role'], 'نامشخص')
+        status_persian = "✅ فعال" if u['status'] == 'active' else "🚫 مسدود"
+        
+        text += f"**{idx}. {u['real_name']}** ({u['camelot_name']})\n"
+        text += f"🆔 کدملی: {u['national_id']}\n"
+        text += f"🏦 شماره حساب: {u['account_number']}\n"
+        text += f"💰 موجودی: {u['balance']} ART\n"
+        text += f"🔒 موجودی بلوکه: {u['blocked_balance']} ART\n"
+        text += f"⭐ امتیاز اعتباری: {u['credit_score']}\n"
+        text += f"👑 نقش: {role_persian}\n"
+        text += f"📊 وضعیت: {status_persian}\n"
+        text += f"📱 آیدی تلگرام: {u['telegram_id']}\n"
+        created = datetime.strptime(u['created_at'], '%Y-%m-%d %H:%M:%S')
+        jcreated = jdatetime.datetime.fromgregorian(datetime=created)
+        text += f"📅 تاریخ افتتاح: {jcreated.strftime('%Y/%m/%d')}\n"
+        text += f"━━━━━━━━━━━━━━━━━━━\n"
+    
+    keyboard = []
+    nav_buttons = []
+    total_pages = (total_users + USERS_PER_PAGE - 1) // USERS_PER_PAGE
+    
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"admin_users_page_{page-1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("➡️ بعدی", callback_data=f"admin_users_page_{page+1}"))
+    
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    keyboard.append([InlineKeyboardButton("🔍 مدیریت کاربر", callback_data="admin_user_manage")])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="back_to_panel")])
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def admin_users_page_handler(update: Update, context):
+    query = update.callback_query
+    data = query.data
+    page = int(data.split('_')[3])
+    await admin_users_list(update, context, page)
+
+async def admin_user_manage_start(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    await query.edit_message_text(
+        "🔍 **مدیریت کاربر**\n\n"
+        "لطفاً کد ملی کملوت کاربر مورد نظر را وارد کنید:\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_user_search'
+
+async def admin_user_search(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ مدیریت کاربر لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        return ConversationHandler.END
+    
+    if len(text) != 6 or not text.isdigit():
+        await update.message.reply_text("❌ کد ملی باید ۶ رقم باشد. دوباره وارد کنید:")
+        return 'admin_user_search'
+    
+    db = get_db()
+    c = db.cursor()
+    c.execute('''
+        SELECT u.id, u.telegram_id, u.real_name, u.camelot_name, u.national_id, u.role, u.created_at,
+               a.id as account_id, a.account_number, a.balance, a.blocked_balance, a.credit_score, 
+               a.status, a.password, a.notes
+        FROM users u
+        JOIN accounts a ON u.id = a.user_id
+        WHERE u.national_id = ?
+    ''', (text,))
+    user = c.fetchone()
+    db.close()
+    
+    if not user:
+        await update.message.reply_text("❌ کاربری با این کد ملی یافت نشد. دوباره وارد کنید:")
+        return 'admin_user_search'
+    
+    context.user_data['admin_target_user_id'] = user['id']
+    context.user_data['admin_target_account_id'] = user['account_id']
+    
+    role_names = {'citizen':'شهروند', 'employee':'کارمند', 'king':'شاه', 'owner':'مالک'}
+    role_persian = role_names.get(user['role'], 'نامشخص')
+    status_persian = "✅ فعال" if user['status'] == 'active' else "🚫 مسدود"
+    
+    created = datetime.strptime(user['created_at'], '%Y-%m-%d %H:%M:%S')
+    jcreated = jdatetime.datetime.fromgregorian(datetime=created)
+    date_str = jcreated.strftime('%Y/%m/%d')
+    
+    info_text = f"""👤 **اطلاعات کاربر**
+━━━━━━━━━━━━━━━━━━━
+📛 **نام واقعی:** {user['real_name']}
+⚔️ **نام کملوتی:** {user['camelot_name']}
+🆔 **کد ملی:** {user['national_id']}
+🏦 **شماره حساب:** `{user['account_number']}`
+🔐 **رمز حساب:** `{user['password']}`
+💰 **موجودی:** {user['balance']} ART
+🔒 **موجودی بلوکه:** {user['blocked_balance']} ART
+⭐ **امتیاز اعتباری:** {user['credit_score']}
+👑 **نقش:** {role_persian}
+📊 **وضعیت:** {status_persian}
+📱 **آیدی تلگرام:** `{user['telegram_id']}`
+📅 **تاریخ افتتاح:** {date_str}
+📝 **یادداشت:** {user['notes'] or 'ندارد'}
+━━━━━━━━━━━━━━━━━━━
+"""
+    
+    keyboard = [
+        [InlineKeyboardButton("✏️ تغییر نام کملوتی", callback_data=f"admin_edit_camelot_{user['id']}")],
+        [InlineKeyboardButton("📱 تغییر آیدی تلگرام", callback_data=f"admin_edit_telegram_{user['id']}")],
+        [InlineKeyboardButton("🆔 تغییر کد ملی", callback_data=f"admin_edit_national_{user['id']}")],
+        [InlineKeyboardButton("🔢 تغییر شماره حساب", callback_data=f"admin_edit_account_{user['account_id']}")],
+        [InlineKeyboardButton("💰 واریز وجه", callback_data=f"admin_add_balance_{user['account_id']}")],
+        [InlineKeyboardButton("🧊 بلوکه کردن موجودی", callback_data=f"admin_freeze_balance_{user['account_id']}")],
+        [InlineKeyboardButton("📊 تغییر وضعیت حساب", callback_data=f"admin_change_status_{user['account_id']}")],
+        [InlineKeyboardButton("⭐ تغییر امتیاز اعتباری", callback_data=f"admin_change_score_{user['account_id']}")],
+        [InlineKeyboardButton("👑 تغییر نقش کاربر", callback_data=f"admin_change_role_{user['id']}")],
+        [InlineKeyboardButton("🔙 بازگشت به لیست کاربران", callback_data="admin_users")]
+    ]
+    await update.message.reply_text(
+        info_text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+    
+    context.user_data.pop('admin_target_user_id', None)
+    context.user_data.pop('admin_target_account_id', None)
+    return ConversationHandler.END
+
+# ---------- توابع مدیریت کاربر ----------
+async def admin_edit_field_start(update: Update, context, field_name, target_id):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    context.user_data['admin_edit_field'] = field_name
+    context.user_data['admin_edit_target'] = target_id
+    
+    field_names = {
+        'camelot': 'نام کملوتی',
+        'telegram': 'آیدی تلگرام',
+        'national': 'کد ملی',
+        'account': 'شماره حساب جدید'
+    }
+    
+    await query.edit_message_text(
+        f"✏️ **تغییر {field_names.get(field_name, field_name)}**\n\n"
+        f"لطفاً مقدار جدید را وارد کنید:\n"
+        f"(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_edit_value'
+
+async def admin_edit_value(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ تغییر لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        context.user_data.pop('admin_edit_field', None)
+        context.user_data.pop('admin_edit_target', None)
+        return ConversationHandler.END
+    
+    field = context.user_data.get('admin_edit_field')
+    target = context.user_data.get('admin_edit_target')
+    
+    if not field or not target:
+        await update.message.reply_text("❌ خطا: اطلاعات ناقص.")
+        return ConversationHandler.END
+    
+    db = get_db()
+    c = db.cursor()
+    
+    if field == 'camelot':
+        c.execute('UPDATE users SET camelot_name = ? WHERE id = ?', (text, target))
+        db.commit()
+        db.close()
+        await update.message.reply_text(f"✅ نام کملوتی با موفقیت به `{text}` تغییر یافت.", parse_mode='Markdown')
+    
+    elif field == 'telegram':
+        if not text.isdigit():
+            await update.message.reply_text("❌ آیدی تلگرام باید عدد باشد. دوباره وارد کنید:")
+            return 'admin_edit_value'
+        c.execute('UPDATE users SET telegram_id = ? WHERE id = ?', (int(text), target))
+        db.commit()
+        db.close()
+        await update.message.reply_text(f"✅ آیدی تلگرام با موفقیت به `{text}` تغییر یافت.", parse_mode='Markdown')
+    
+    elif field == 'national':
+        if len(text) != 6 or not text.isdigit():
+            await update.message.reply_text("❌ کد ملی باید ۶ رقم باشد. دوباره وارد کنید:")
+            return 'admin_edit_value'
+        c.execute('SELECT id FROM users WHERE national_id = ? AND id != ?', (text, target))
+        if c.fetchone():
+            db.close()
+            await update.message.reply_text("❌ این کد ملی قبلاً ثبت شده. لطفاً کد دیگری وارد کنید:")
+            return 'admin_edit_value'
+        c.execute('UPDATE users SET national_id = ? WHERE id = ?', (text, target))
+        db.commit()
+        db.close()
+        await update.message.reply_text(f"✅ کد ملی با موفقیت به `{text}` تغییر یافت.", parse_mode='Markdown')
+    
+    elif field == 'account':
+        if len(text) != 6 or not text.isdigit():
+            await update.message.reply_text("❌ شماره حساب باید ۶ رقم باشد. دوباره وارد کنید:")
+            return 'admin_edit_value'
+        c.execute('SELECT id FROM accounts WHERE account_number = ? AND id != ?', (text, target))
+        if c.fetchone():
+            db.close()
+            await update.message.reply_text("❌ این شماره حساب قبلاً ثبت شده. لطفاً شماره دیگری وارد کنید:")
+            return 'admin_edit_value'
+        c.execute('UPDATE accounts SET account_number = ? WHERE id = ?', (text, target))
+        db.commit()
+        db.close()
+        await update.message.reply_text(f"✅ شماره حساب با موفقیت به `{text}` تغییر یافت.", parse_mode='Markdown')
+    
+    context.user_data.pop('admin_edit_field', None)
+    context.user_data.pop('admin_edit_target', None)
+    return ConversationHandler.END
+
+async def admin_add_balance_start(update: Update, context, account_id):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    context.user_data['admin_add_balance_account'] = account_id
+    await query.edit_message_text(
+        "💰 **واریز وجه به حساب کاربر**\n\n"
+        "لطفاً مبلغ مورد نظر را به ART وارد کنید:\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_add_balance_amount'
+
+async def admin_add_balance_amount(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ واریز لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        context.user_data.pop('admin_add_balance_account', None)
+        return ConversationHandler.END
+    
+    try:
+        amount = int(text)
+        if amount <= 0:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ لطفاً یک عدد مثبت وارد کنید:")
+        return 'admin_add_balance_amount'
+    
+    account_id = context.user_data.get('admin_add_balance_account')
+    if not account_id:
+        await update.message.reply_text("❌ خطا: شناسه حساب یافت نشد.")
+        return ConversationHandler.END
+    
+    db = get_db()
+    c = db.cursor()
+    c.execute('SELECT balance, user_id, account_number FROM accounts WHERE id = ?', (account_id,))
+    acc = c.fetchone()
+    if not acc:
+        db.close()
+        await update.message.reply_text("❌ حساب یافت نشد.")
+        return ConversationHandler.END
+    
+    new_balance = acc['balance'] + amount
+    c.execute('UPDATE accounts SET balance = ? WHERE id = ?', (new_balance, account_id))
+    
+    txid = generate_txid()
+    c.execute('''
+        INSERT INTO transactions (txid, receiver_account, amount, type, reason)
+        VALUES (?, ?, ?, 'manual_deposit', 'واریز مدیریتی')
+    ''', (txid, acc['account_number'], amount))
+    
+    db.commit()
+    db.close()
+    
+    log_audit(user_id, 'manual_deposit', f'account:{account_id}', f'amount:{amount}')
+    
+    await update.message.reply_text(
+        f"✅ مبلغ {amount} ART با موفقیت به حساب واریز شد.\n"
+        f"موجودی جدید: {new_balance} ART",
+        reply_markup=main_menu_keyboard(get_user_role_display(user_id))
+    )
+    context.user_data.pop('admin_add_balance_account', None)
+    return ConversationHandler.END
+
+async def admin_freeze_balance_start(update: Update, context, account_id):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    context.user_data['admin_freeze_account'] = account_id
+    await query.edit_message_text(
+        "🧊 **بلوکه کردن موجودی کاربر**\n\n"
+        "لطفاً مبلغی که می‌خواهید بلوکه کنید را وارد کنید:\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_freeze_amount'
+
+async def admin_freeze_amount(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ بلوکه لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        context.user_data.pop('admin_freeze_account', None)
+        return ConversationHandler.END
+    
+    try:
+        amount = int(text)
+        if amount <= 0:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ لطفاً یک عدد مثبت وارد کنید:")
+        return 'admin_freeze_amount'
+    
+    account_id = context.user_data.get('admin_freeze_account')
+    if not account_id:
+        await update.message.reply_text("❌ خطا: شناسه حساب یافت نشد.")
+        return ConversationHandler.END
+    
+    db = get_db()
+    c = db.cursor()
+    c.execute('SELECT balance, blocked_balance, user_id FROM accounts WHERE id = ?', (account_id,))
+    acc = c.fetchone()
+    if not acc:
+        db.close()
+        await update.message.reply_text("❌ حساب یافت نشد.")
+        return ConversationHandler.END
+    
+    if amount > acc['balance'] - acc['blocked_balance']:
+        await update.message.reply_text(f"❌ موجودی قابل استفاده کافی نیست.\nموجودی قابل استفاده: {acc['balance'] - acc['blocked_balance']} ART")
+        return 'admin_freeze_amount'
+    
+    new_blocked = acc['blocked_balance'] + amount
+    c.execute('UPDATE accounts SET blocked_balance = ? WHERE id = ?', (new_blocked, account_id))
+    db.commit()
+    db.close()
+    
+    log_audit(user_id, 'freeze_balance', f'account:{account_id}', f'amount:{amount}')
+    
+    await update.message.reply_text(
+        f"✅ مبلغ {amount} ART با موفقیت بلوکه شد.\n"
+        f"موجودی بلوکه شده جدید: {new_blocked} ART",
+        reply_markup=main_menu_keyboard(get_user_role_display(user_id))
+    )
+    context.user_data.pop('admin_freeze_account', None)
+    return ConversationHandler.END
+
+async def admin_change_status(update: Update, context, account_id):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    db = get_db()
+    c = db.cursor()
+    c.execute('SELECT status FROM accounts WHERE id = ?', (account_id,))
+    acc = c.fetchone()
+    if not acc:
+        db.close()
+        await query.edit_message_text("❌ حساب یافت نشد.")
+        return
+    
+    new_status = 'blocked' if acc['status'] == 'active' else 'active'
+    c.execute('UPDATE accounts SET status = ? WHERE id = ?', (new_status, account_id))
+    db.commit()
+    db.close()
+    
+    status_names = {'active': 'فعال', 'blocked': 'مسدود'}
+    log_audit(user_id, 'change_status', f'account:{account_id}', f'new:{new_status}')
+    
+    await query.edit_message_text(
+        f"✅ وضعیت حساب با موفقیت به **{status_names[new_status]}** تغییر یافت.",
+        reply_markup=main_menu_keyboard(get_user_role_display(user_id)),
+        parse_mode='Markdown'
+    )
+
+async def admin_change_score_start(update: Update, context, account_id):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    context.user_data['admin_score_account'] = account_id
+    await query.edit_message_text(
+        "⭐ **تغییر امتیاز اعتباری**\n\n"
+        "لطفاً امتیاز جدید را وارد کنید (۰ تا ۱۰۰۰):\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_change_score_value'
+
+async def admin_change_score_value(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ تغییر امتیاز لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        context.user_data.pop('admin_score_account', None)
+        return ConversationHandler.END
+    
+    try:
+        new_score = int(text)
+        if new_score < 0 or new_score > 1000:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ امتیاز باید عددی بین 0 تا 1000 باشد. دوباره وارد کنید:")
+        return 'admin_change_score_value'
+    
+    account_id = context.user_data.get('admin_score_account')
+    if not account_id:
+        await update.message.reply_text("❌ خطا: شناسه حساب یافت نشد.")
+        return ConversationHandler.END
+    
+    db = get_db()
+    c = db.cursor()
+    c.execute('SELECT credit_score FROM accounts WHERE id = ?', (account_id,))
+    acc = c.fetchone()
+    if not acc:
+        db.close()
+        await update.message.reply_text("❌ حساب یافت نشد.")
+        return ConversationHandler.END
+    
+    c.execute('UPDATE accounts SET credit_score = ? WHERE id = ?', (new_score, account_id))
+    c.execute('INSERT INTO credit_history (account_id, old_score, new_score, reason) VALUES (?, ?, ?, ?)',
+              (account_id, acc['credit_score'], new_score, 'تغییر توسط مدیریت'))
+    db.commit()
+    db.close()
+    
+    log_audit(user_id, 'change_score', f'account:{account_id}', f'old:{acc["credit_score"]},new:{new_score}')
+    
+    await update.message.reply_text(
+        f"✅ امتیاز اعتباری با موفقیت به **{new_score}** تغییر یافت.",
+        reply_markup=main_menu_keyboard(get_user_role_display(user_id)),
+        parse_mode='Markdown'
+    )
+    context.user_data.pop('admin_score_account', None)
+    return ConversationHandler.END
+
+async def admin_change_role(update: Update, context, user_id):
+    query = update.callback_query
+    await query.answer()
+    admin_user_id = update.effective_user.id
+    
+    if not is_admin(admin_user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    db = get_db()
+    c = db.cursor()
+    c.execute('SELECT role FROM users WHERE id = ?', (user_id,))
+    user = c.fetchone()
+    if not user:
+        db.close()
+        await query.edit_message_text("❌ کاربر یافت نشد.")
+        return
+    
+    roles = ['citizen', 'employee', 'king']
+    current_role = user['role']
+    
+    try:
+        idx = roles.index(current_role)
+        new_role = roles[(idx + 1) % len(roles)]
+    except:
+        new_role = 'citizen'
+    
+    c.execute('UPDATE users SET role = ? WHERE id = ?', (new_role, user_id))
+    db.commit()
+    db.close()
+    
+    role_names = {'citizen':'شهروند', 'employee':'کارمند', 'king':'شاه', 'owner':'مالک'}
+    
+    await query.edit_message_text(
+        f"✅ نقش کاربر با موفقیت به **{role_names[new_role]}** تغییر یافت.",
+        reply_markup=main_menu_keyboard(get_user_role_display(admin_user_id)),
+        parse_mode='Markdown'
+    )
 
 # ---------- صندوق پیام ----------
 async def notifications_menu(update: Update, context):
@@ -1102,6 +1642,70 @@ def main():
     )
     app.add_handler(support_reply_conv)
     
+    # مدیریت کاربران
+    app.add_handler(CallbackQueryHandler(admin_users_list, pattern="^admin_users$"))
+    app.add_handler(CallbackQueryHandler(admin_users_page_handler, pattern="^admin_users_page_"))
+    
+    admin_user_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_user_manage_start, pattern="^admin_user_manage$")],
+        states={
+            'admin_user_search': [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_user_search)],
+        },
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(admin_user_conv)
+    
+    # تغییر فیلدها
+    admin_edit_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(lambda u,c: admin_edit_field_start(u,c, 'camelot', int(u.callback_query.data.split('_')[3])), pattern="^admin_edit_camelot_"),
+            CallbackQueryHandler(lambda u,c: admin_edit_field_start(u,c, 'telegram', int(u.callback_query.data.split('_')[3])), pattern="^admin_edit_telegram_"),
+            CallbackQueryHandler(lambda u,c: admin_edit_field_start(u,c, 'national', int(u.callback_query.data.split('_')[3])), pattern="^admin_edit_national_"),
+            CallbackQueryHandler(lambda u,c: admin_edit_field_start(u,c, 'account', int(u.callback_query.data.split('_')[3])), pattern="^admin_edit_account_"),
+        ],
+        states={
+            'admin_edit_value': [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_value)],
+        },
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(admin_edit_conv)
+    
+    # واریز وجه
+    admin_add_balance_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(lambda u,c: admin_add_balance_start(u,c, int(u.callback_query.data.split('_')[3])), pattern="^admin_add_balance_")],
+        states={
+            'admin_add_balance_amount': [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_balance_amount)],
+        },
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(admin_add_balance_conv)
+    
+    # بلوکه موجودی
+    admin_freeze_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(lambda u,c: admin_freeze_balance_start(u,c, int(u.callback_query.data.split('_')[3])), pattern="^admin_freeze_balance_")],
+        states={
+            'admin_freeze_amount': [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_freeze_amount)],
+        },
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(admin_freeze_conv)
+    
+    # تغییر وضعیت حساب
+    app.add_handler(CallbackQueryHandler(lambda u,c: admin_change_status(u,c, int(u.callback_query.data.split('_')[3])), pattern="^admin_change_status_"))
+    
+    # تغییر امتیاز اعتباری
+    admin_score_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(lambda u,c: admin_change_score_start(u,c, int(u.callback_query.data.split('_')[3])), pattern="^admin_change_score_")],
+        states={
+            'admin_change_score_value': [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_change_score_value)],
+        },
+        fallbacks=[CommandHandler("start", start), CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(admin_score_conv)
+    
+    # تغییر نقش
+    app.add_handler(CallbackQueryHandler(lambda u,c: admin_change_role(u,c, int(u.callback_query.data.split('_')[3])), pattern="^admin_change_role_"))
+    
     # دستورات اصلی
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancel", cancel))
@@ -1128,9 +1732,8 @@ def main():
     app.add_handler(CallbackQueryHandler(loan_disabled_handler, pattern="^loan_pay$"))
     app.add_handler(CallbackQueryHandler(loan_disabled_handler, pattern="^loan_status$"))
     
-    # placeholder
-    for p in ["change_account",
-              "admin_users","admin_finance","admin_treasury","admin_requests"]:
+    # placeholder برای بخش‌های ناقص
+    for p in ["change_account"]:
         app.add_handler(CallbackQueryHandler(placeholder_handler, pattern=f"^{p}$"))
     
     print("✅ ربات بانک کملوت روشن شد!")
