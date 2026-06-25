@@ -152,7 +152,6 @@ async def start(update: Update, context):
         )
         return
 
-    # پاک کردن هرگونه داده‌ی موقت برای جلوگیری از تداخل
     context.user_data.clear()
 
     if not user:
@@ -478,9 +477,1299 @@ async def confirm_callback(update: Update, context):
         for key in ['real_name','camelot_name','national_id','password','register_step','username']:
             context.user_data.pop(key, None)
 
-# ==================== بقیه توابع ====================
-# (برای حفظ طول مناسب، سایر توابع مانند refresh_role_callback, balance_callback, etc. 
-# دقیقاً مانند کد قبلی هستند. فقط مطمئن شوید که در همه‌ی آن‌ها در ابتدا و انتها context.user_data مدیریت شده است.)
+# ==================== بخش‌های عادی ====================
+async def refresh_role_callback(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if is_owner(user_id):
+        await query.edit_message_text(
+            "⛔ شما مالک هستید. لطفاً از گزینه «بازیابی اطلاعات» استفاده کنید.",
+            parse_mode='Markdown'
+        )
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        await query.edit_message_text(
+            "❌ شما هنوز حساب بانکی ندارید. لطفاً /start کنید.",
+            parse_mode='Markdown'
+        )
+        return
+    if user_id == OWNER_ID:
+        new_role = 'owner'
+    elif user_id == KING_ID:
+        new_role = 'king'
+    elif user_id in EMPLOYEES_IDS:
+        new_role = 'employee'
+    else:
+        new_role = 'citizen'
+    current_role = user['role']
+    if current_role == new_role:
+        await query.edit_message_text(
+            f"✅ نقش شما در حال حاضر همان {get_user_role_display(user_id)} است.",
+            reply_markup=main_menu_keyboard(current_role, user_id),
+            parse_mode='Markdown'
+        )
+        return
+    db = get_db()
+    c = db.cursor()
+    c.execute("UPDATE users SET role = ? WHERE telegram_id = ?", (new_role, user_id))
+    db.commit()
+    db.close()
+    log_audit(user_id, 'role_refresh', f'old:{current_role}', f'new:{new_role}')
+    await query.edit_message_text(
+        f"✅ **نقش شما به‌روز شد!**\n\n"
+        f"👑 نقش جدید: {get_user_role_display(user_id)}\n\n"
+        f"لطفاً دوباره از منوی اصلی استفاده کنید.",
+        reply_markup=main_menu_keyboard(new_role, user_id),
+        parse_mode='Markdown'
+    )
+
+async def balance_callback(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        await query.edit_message_text("❌ حساب ندارید. لطفاً /start بزنید.")
+        return
+    acc = get_account_by_user_id(user['id'])
+    if not acc:
+        await query.edit_message_text("❌ حساب بانکی یافت نشد.")
+        return
+    balance_text = format_balance(acc['balance'], acc['blocked_balance'])
+    await query.edit_message_text(
+        balance_text,
+        reply_markup=main_menu_keyboard(user['role'], user_id)
+    )
+
+async def my_info_callback(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user or not (acc := get_account_by_user_id(user['id'])):
+        await query.edit_message_text("❌ اطلاعاتی یافت نشد.")
+        return
+    status_persian = "✅ فعال" if acc['status'] == 'active' else "🚫 مسدود"
+    now_jalali = get_jalali_date()
+    info_text = f"""👤 **اطلاعات حساب شما**
+━━━━━━━━━━━━━━━━━━━
+📛 نام واقعی: {user['real_name']}
+⚔️ نام کملوتی: {user['camelot_name']}
+🆔 کد ملی: {user['national_id']}
+🏦 شماره حساب: `{acc['account_number']}`
+⭐ امتیاز اعتباری: {acc['credit_score']}
+👑 نقش: {get_user_role_display(user_id)}
+📊 وضعیت: {status_persian}
+🕐 آخرین به‌روزرسانی: {now_jalali}
+━━━━━━━━━━━━━━━━━━━"""
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 بررسی مجدد حساب", callback_data="refresh_role")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]
+    ])
+    await query.edit_message_text(info_text, reply_markup=keyboard, parse_mode='Markdown')
+
+async def refresh_role(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        await query.edit_message_text("❌ شما هنوز حساب بانکی ندارید. لطفاً اول /start کنید.")
+        return
+    if user_id == OWNER_ID:
+        new_role = 'owner'
+    elif user_id == KING_ID:
+        new_role = 'king'
+    elif user_id in EMPLOYEES_IDS:
+        new_role = 'employee'
+    else:
+        new_role = 'citizen'
+    current_role = user['role']
+    if current_role == new_role:
+        await query.edit_message_text(
+            f"✅ نقش شما در حال حاضر همان {get_user_role_display(user_id)} است.",
+            reply_markup=main_menu_keyboard(current_role, user_id)
+        )
+        return
+    db = get_db()
+    c = db.cursor()
+    c.execute("UPDATE users SET role = ? WHERE telegram_id = ?", (new_role, user_id))
+    db.commit()
+    db.close()
+    log_audit(user_id, 'role_refresh', f'old:{current_role}', f'new:{new_role}')
+    await query.edit_message_text(
+        f"✅ **نقش شما به‌روز شد!**\n\n"
+        f"👑 نقش جدید: {get_user_role_display(user_id)}\n\n"
+        f"لطفاً دوباره از منوی اصلی استفاده کنید.",
+        reply_markup=main_menu_keyboard(new_role, user_id)
+    )
+
+async def my_credit_callback(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user or not (acc := get_account_by_user_id(user['id'])):
+        await query.edit_message_text("❌ اطلاعاتی یافت نشد.")
+        return
+    score = acc['credit_score']
+    if score >= 900:
+        rating = "🟢 عالی"
+    elif score >= 700:
+        rating = "🟡 خوب"
+    elif score >= 500:
+        rating = "🟠 متوسط"
+    elif score >= 300:
+        rating = "🔴 ضعیف"
+    else:
+        rating = "⚫ بدحساب"
+    await query.edit_message_text(
+        f"📈 **اعتبار بانکی شما**\n━━━━━━━━━━━━━━━━━━━\n⭐ امتیاز: {score}\n🏷 رتبه: {rating}",
+        reply_markup=main_menu_keyboard(user['role'], user_id),
+        parse_mode='Markdown'
+    )
+
+async def panel_callback(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    role_persian = get_user_role_display(user_id)
+    now_jalali = get_jalali_date()
+    keyboard = []
+    keyboard.append([InlineKeyboardButton("👥 مدیریت کاربران", callback_data="admin_users")])
+    if is_king_or_owner(user_id):
+        keyboard.append([InlineKeyboardButton("📣 ارسال پیام همگانی", callback_data="admin_broadcast")])
+    keyboard.append([InlineKeyboardButton("📨 پیام‌های پشتیبانی", callback_data="admin_support")])
+    keyboard.append([InlineKeyboardButton("📋 لاگ‌های سیستم", callback_data="admin_logs")])
+    if user['role'] == 'owner':
+        keyboard.append([InlineKeyboardButton("💾 پشتیبان‌گیری و بازیابی", callback_data="admin_backup")])
+        if is_bot_online():
+            keyboard.append([InlineKeyboardButton("🔴 خاموش کردن ربات", callback_data="admin_toggle_bot")])
+        else:
+            keyboard.append([InlineKeyboardButton("🟢 روشن کردن ربات", callback_data="admin_toggle_bot")])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")])
+    panel_text = f"👑 **پنل مدیریت**\n👤 نقش: {role_persian}\n🕐 {now_jalali}"
+    await query.edit_message_text(panel_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def admin_toggle_bot(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    current_status = get_setting('bot_status')
+    new_status = 'off' if current_status != 'off' else 'on'
+    set_setting('bot_status', new_status)
+    status_text = "خاموش" if new_status == 'off' else "روشن"
+    await log_to_system('admin_action', f'ربات {status_text} شد', f'توسط: {get_user_role_display(user_id)}', actor_id=user_id)
+    await query.edit_message_text(
+        f"✅ **ربات با موفقیت {status_text} شد.**\n\n"
+        f"وضعیت فعلی: {'🔴 خاموش' if new_status == 'off' else '🟢 روشن'}",
+        reply_markup=main_menu_keyboard('owner', user_id),
+        parse_mode='Markdown'
+    )
+
+async def back_to_panel(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    await panel_callback(update, context)
+
+async def back_to_menu(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    user = get_user_by_telegram_id(user_id)
+    role = user['role'] if user else 'citizen'
+    await query.edit_message_text(
+        get_setting('welcome_message') or "منوی اصلی",
+        reply_markup=main_menu_keyboard(role, user_id)
+    )
+
+# ==================== انتقال وجه ====================
+async def transfer_start(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user or not (acc := get_account_by_user_id(user['id'])) or acc['status'] != 'active':
+        await query.edit_message_text("❌ حساب مسدود یا وجود ندارد.")
+        return
+    context.user_data['transfer_step'] = TRANSFER_ACCOUNT
+    await query.edit_message_text("💸 شماره حساب مقصد (۶ رقم) را وارد کنید:\n(برای لغو /cancel بزنید)", parse_mode='Markdown')
+    return TRANSFER_ACCOUNT
+
+async def transfer_account_handler(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
+        context.user_data.pop('transfer_step', None)
+        return ConversationHandler.END
+    if not text.isdigit() or len(text) != 6:
+        await update.message.reply_text("❌ شماره حساب باید ۶ رقم باشد.")
+        return TRANSFER_ACCOUNT
+    sender_user = get_user_by_telegram_id(user_id)
+    sender_acc = get_account_by_user_id(sender_user['id'])
+    if sender_acc['account_number'] == text:
+        await update.message.reply_text("❌ نمی‌توانید به خودتان انتقال دهید.")
+        return TRANSFER_ACCOUNT
+    receiver_acc = get_account_by_number(text)
+    if not receiver_acc:
+        await update.message.reply_text("❌ حساب مقصد یافت نشد.")
+        return TRANSFER_ACCOUNT
+    receiver_user = get_user_by_account_number(text)
+    context.user_data['transfer_receiver_account'] = text
+    context.user_data['transfer_receiver_name'] = receiver_user['camelot_name']
+    context.user_data['transfer_step'] = TRANSFER_AMOUNT
+    await update.message.reply_text(f"✅ مقصد: {receiver_user['camelot_name']}\n💰 مبلغ را وارد کنید:", parse_mode='Markdown')
+    return TRANSFER_AMOUNT
+
+async def transfer_amount_handler(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
+        context.user_data.pop('transfer_step', None)
+        return ConversationHandler.END
+    try:
+        amount = int(text)
+        if amount <= 0: raise ValueError
+    except:
+        await update.message.reply_text("❌ عدد مثبت وارد کنید.")
+        return TRANSFER_AMOUNT
+    sender_user = get_user_by_telegram_id(user_id)
+    sender_acc = get_account_by_user_id(sender_user['id'])
+    usable = sender_acc['balance'] - sender_acc['blocked_balance']
+    if amount > usable:
+        await update.message.reply_text(f"❌ موجودی کافی نیست. قابل استفاده: {usable} ART")
+        return TRANSFER_AMOUNT
+    limit = int(get_setting('monthly_transfer_limit') or 50000)
+    if sender_acc['monthly_transfer_used'] + amount > limit:
+        await update.message.reply_text(f"❌ سقف ماهانه {limit} ART تکمیل است.")
+        return TRANSFER_AMOUNT
+    context.user_data['transfer_amount'] = amount
+    context.user_data['transfer_step'] = TRANSFER_REASON
+    await update.message.reply_text(f"💰 مبلغ: {amount} ART\n📝 علت (اختیاری، «ندارد» برای رد):\n(برای لغو /cancel بزنید)")
+    return TRANSFER_REASON
+
+async def transfer_reason_handler(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
+        context.user_data.pop('transfer_step', None)
+        return ConversationHandler.END
+    reason = text if text.lower() != 'ندارد' else None
+    context.user_data['transfer_reason'] = reason
+    context.user_data['transfer_step'] = TRANSFER_PASSWORD
+    await update.message.reply_text(f"🔐 رمز ۴ رقمی خود را وارد کنید:\n(برای لغو /cancel بزنید)")
+    return TRANSFER_PASSWORD
+
+async def transfer_password_handler(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
+        context.user_data.pop('transfer_step', None)
+        return ConversationHandler.END
+    if not text.isdigit() or len(text) != 4:
+        await update.message.reply_text("❌ رمز ۴ رقم باید باشد.")
+        return TRANSFER_PASSWORD
+    sender_user = get_user_by_telegram_id(user_id)
+    sender_acc = get_account_by_user_id(sender_user['id'])
+    if sender_acc['password'] != text:
+        await update.message.reply_text("❌ رمز اشتباه است.")
+        return TRANSFER_PASSWORD
+    amount = context.user_data['transfer_amount']
+    receiver_account = context.user_data['transfer_receiver_account']
+    receiver_acc = get_account_by_number(receiver_account)
+    receiver_user = get_user_by_account_number(receiver_account)
+    fee = 0
+    total = amount + fee
+    if sender_acc['balance'] - sender_acc['blocked_balance'] < total:
+        await update.message.reply_text("❌ موجودی کافی نیست.")
+        return ConversationHandler.END
+    new_sender = sender_acc['balance'] - total
+    new_receiver = receiver_acc['balance'] + amount
+    new_monthly = sender_acc['monthly_transfer_used'] + amount
+    db = get_db()
+    c = db.cursor()
+    c.execute('UPDATE accounts SET balance=?, monthly_transfer_used=? WHERE id=?', (new_sender, new_monthly, sender_acc['id']))
+    c.execute('UPDATE accounts SET balance=? WHERE id=?', (new_receiver, receiver_acc['id']))
+    txid = generate_txid()
+    c.execute('INSERT INTO transactions (txid, sender_account, receiver_account, amount, fee, reason, type) VALUES (?,?,?,?,?,?,"transfer")',
+              (txid, sender_acc['account_number'], receiver_account, amount, fee, context.user_data.get('transfer_reason')))
+    db.commit()
+    db.close()
+    log_audit(user_id, 'transfer', f'to:{receiver_account}', f'amount:{amount}')
+    receipt = format_receipt(txid, 'انتقال وجه', f"{sender_user['camelot_name']} ({sender_acc['account_number']})",
+                             f"{receiver_user['camelot_name']} ({receiver_account})", amount, fee, context.user_data.get('transfer_reason'))
+    await update.message.reply_text(receipt, parse_mode='Markdown')
+    await send_message_to_user(context, receiver_user['telegram_id'],
+                               f"💸 دریافت {amount} ART از {sender_user['camelot_name']}\nموجودی جدید: {new_receiver} ART")
+    await log_to_system(
+        'transaction',
+        f'انتقال وجه - {amount} ART',
+        f'فرستنده: {sender_user["camelot_name"]} ({sender_acc["account_number"]})\nگیرنده: {receiver_user["camelot_name"]} ({receiver_account})\nتوضیحات: {context.user_data.get("transfer_reason") or "ندارد"}',
+        actor_id=user_id,
+        target_id=receiver_user['id']
+    )
+    context.user_data.pop('transfer_step', None)
+    return ConversationHandler.END
+
+# ==================== بخش وام (غیرفعال) ====================
+async def loan_disabled_handler(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    await query.edit_message_text(
+        "⏳ **بخش وام در حال به‌روزرسانی است**\n\n"
+        "این بخش به زودی با امکانات کامل‌تر فعال خواهد شد.\n"
+        "از صبر شما متشکریم.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]]),
+        parse_mode='Markdown'
+    )
+
+# ==================== تراکنش‌های من ====================
+async def my_transactions_menu(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        await query.edit_message_text("❌ حساب ندارید. لطفاً /start بزنید.")
+        return
+    acc = get_account_by_user_id(user['id'])
+    if not acc:
+        await query.edit_message_text("❌ حساب بانکی یافت نشد.")
+        return
+    context.user_data['trans_type'] = 'all'
+    context.user_data['trans_page'] = 0
+    await show_transactions(update, context, tx_type=None, page=0)
+
+async def show_transactions(update: Update, context, tx_type=None, page=0):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        await query.edit_message_text("❌ حساب ندارید.")
+        return
+    acc = get_account_by_user_id(user['id'])
+    if not acc:
+        await query.edit_message_text("❌ حساب بانکی یافت نشد.")
+        return
+    offset = page * TRANSACTIONS_PER_PAGE
+    transactions, total = get_user_transactions(user['id'], TRANSACTIONS_PER_PAGE, offset, tx_type)
+    if not transactions:
+        await query.edit_message_text(
+            "📭 شما هیچ تراکنشی ندارید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]])
+        )
+        return
+    text = f"📊 **لیست تراکنش‌ها** (صفحه {page+1})\n━━━━━━━━━━━━━━━━━━━\n\n"
+    for tx in transactions:
+        text += format_transaction_summary(tx, acc['account_number']) + "\n━━━━━━━━━━━━━━━━━━━\n"
+    total_pages = (total + TRANSACTIONS_PER_PAGE - 1) // TRANSACTIONS_PER_PAGE
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"trans_page_{page-1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("➡️ بعدی", callback_data=f"trans_page_{page+1}"))
+    keyboard = []
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به منو", callback_data="back_to_menu")])
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def transactions_page_handler(update: Update, context):
+    query = update.callback_query
+    data = query.data
+    parts = data.split('_')
+    page = int(parts[2])
+    context.user_data['trans_page'] = page
+    await show_transactions(update, context, tx_type=None, page=page)
+
+# ==================== ارسال پیام همگانی (فقط شاه/مالک) ====================
+async def admin_broadcast_start(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if not is_king_or_owner(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    await query.edit_message_text(
+        "📣 **ارسال پیام همگانی**\n\n"
+        "لطفاً متن پیام خود را وارد کنید:\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return BROADCAST_MESSAGE
+
+async def admin_broadcast_receive(update: Update, context):
+    text = update.message.text
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ ارسال پیام لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
+        return ConversationHandler.END
+    context.user_data['broadcast_text'] = text
+    context.user_data['broadcast_step'] = BROADCAST_CONFIRM
+    db = get_db()
+    c = db.cursor()
+    c.execute('SELECT COUNT(DISTINCT user_id) FROM accounts')
+    count = c.fetchone()[0]
+    db.close()
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ بله، ارسال کن", callback_data="broadcast_yes")],
+        [InlineKeyboardButton("❌ لغو", callback_data="broadcast_no")]
+    ])
+    await update.message.reply_text(
+        f"📣 **تأیید ارسال پیام همگانی**\n\n"
+        f"📝 متن پیام:\n```\n{text}\n```\n\n"
+        f"👥 تعداد گیرندگان: {count} کاربر\n\n"
+        f"آیا از ارسال این پیام مطمئن هستید؟",
+        reply_markup=keyboard,
+        parse_mode='Markdown'
+    )
+    return BROADCAST_CONFIRM
+
+async def admin_broadcast_confirm(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if query.data == "broadcast_yes":
+        text = context.user_data.get('broadcast_text')
+        if not text:
+            await query.edit_message_text("❌ خطا: متن پیام یافت نشد.")
+            return ConversationHandler.END
+        db = get_db()
+        c = db.cursor()
+        c.execute('''
+            SELECT DISTINCT users.id as user_id, users.telegram_id 
+            FROM accounts 
+            JOIN users ON accounts.user_id = users.id
+        ''')
+        users = c.fetchall()
+        db.close()
+        if not users:
+            await query.edit_message_text("❌ هیچ کاربری برای ارسال پیام وجود ندارد.")
+            return ConversationHandler.END
+        await query.edit_message_text(
+            f"📣 در حال ارسال پیام به {len(users)} کاربر...\nلطفاً صبر کنید.",
+            parse_mode='Markdown'
+        )
+        success_count = 0
+        fail_count = 0
+        for u in users:
+            try:
+                await context.bot.send_message(
+                    u['telegram_id'],
+                    f"📣 **پیام همگانی بانک کملوت**\n\n{text}",
+                    parse_mode='Markdown'
+                )
+                send_notification(u['user_id'], 'پیام همگانی', text)
+                success_count += 1
+            except Exception as e:
+                logger.error(f"خطا در ارسال به {u['telegram_id']}: {e}")
+                fail_count += 1
+            await asyncio.sleep(0.05)
+        await log_to_system('admin_action', 'پیام همگانی ارسال شد', f'تعداد موفق: {success_count} - تعداد ناموفق: {fail_count}', actor_id=user_id)
+        await query.edit_message_text(
+            f"✅ **پیام همگانی با موفقیت ارسال شد!**\n\n"
+            f"✅ موفق: {success_count}\n"
+            f"❌ ناموفق: {fail_count}",
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
+        )
+    else:
+        await query.edit_message_text(
+            "❌ ارسال پیام لغو شد.",
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
+        )
+    context.user_data.pop('broadcast_text', None)
+    context.user_data.pop('broadcast_step', None)
+    return ConversationHandler.END
+
+# ==================== پشتیبانی (برای کاربران) ====================
+async def support_start(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        await query.edit_message_text("❌ حساب ندارید. لطفاً /start بزنید.")
+        return
+    await query.edit_message_text(
+        "🆘 **پشتیبانی بانک کملوت**\n\n"
+        "لطفاً پیام خود را بنویسید.\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return SUPPORT_MESSAGE
+
+async def support_receive(update: Update, context):
+    text = update.message.text
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    user = get_user_by_telegram_id(user_id)
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ ارسال پیام پشتیبانی لغو شد.", reply_markup=main_menu_keyboard(user['role'] if user else 'citizen', user_id))
+        return ConversationHandler.END
+    if not user:
+        await update.message.reply_text("❌ شما حساب ندارید. لطفاً /start کنید.")
+        return ConversationHandler.END
+    acc = get_account_by_user_id(user['id'])
+    account_number = acc['account_number'] if acc else 'ندارد'
+    db = get_db()
+    c = db.cursor()
+    c.execute('''
+        INSERT INTO support_tickets (user_id, message, status)
+        VALUES (?, ?, 'pending')
+    ''', (user['id'], text))
+    ticket_id = c.lastrowid
+    db.commit()
+    db.close()
+    admin_message = f"""🆘 **پیام جدید پشتیبانی** (تیکت #{ticket_id})
+
+👤 کاربر: {user['real_name']} ({user['camelot_name']})
+🆔 کد ملی: {user['national_id']}
+🏦 شماره حساب: {account_number}
+📱 آیدی تلگرام: {user['telegram_id']}
+
+📝 **متن پیام:**
+{text}
+
+🕐 زمان: {get_jalali_date()}
+"""
+    try:
+        await context.bot.send_message(OWNER_ID, admin_message, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"خطا در ارسال پیام پشتیبانی به مالک: {e}")
+    await update.message.reply_text(
+        "✅ پیام شما ارسال شد.",
+        reply_markup=main_menu_keyboard(user['role'], user_id)
+    )
+    await log_to_system('support', f'تیکت پشتیبانی #{ticket_id}', f'از: {user["camelot_name"]}\nمتن: {text}', actor_id=user['id'])
+    return ConversationHandler.END
+
+# ==================== مدیریت پشتیبانی ====================
+async def admin_support_list(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    db = get_db()
+    c = db.cursor()
+    c.execute('''
+        SELECT st.*, u.camelot_name, u.real_name 
+        FROM support_tickets st
+        JOIN users u ON st.user_id = u.id
+        WHERE st.status = 'pending'
+        ORDER BY st.created_at DESC
+    ''')
+    tickets = c.fetchall()
+    db.close()
+    if not tickets:
+        await query.edit_message_text(
+            "📭 **هیچ پیام پشتیبانی جدیدی وجود ندارد.**",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_panel")]])
+        )
+        return
+    text = "📨 **لیست پیام‌های پشتیبانی (در انتظار پاسخ)**\n━━━━━━━━━━━━━━━━━━━\n\n"
+    keyboard = []
+    for t in tickets:
+        created = datetime.strptime(t['created_at'], '%Y-%m-%d %H:%M:%S')
+        jcreated = jdatetime.datetime.fromgregorian(datetime=created)
+        date_str = jcreated.strftime('%Y/%m/%d %H:%M')
+        text += f"🆔 #{t['id']} - {t['camelot_name']}\n"
+        text += f"📝 {t['message'][:50]}{'...' if len(t['message']) > 50 else ''}\n"
+        text += f"🕐 {date_str}\n━━━━━━━━━━━━━━━━━━━\n"
+        keyboard.append([InlineKeyboardButton(f"📩 پاسخ به #{t['id']}", callback_data=f"support_reply_{t['id']}")])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_panel")])
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def admin_support_reply_start(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    ticket_id = int(query.data.split('_')[2])
+    context.user_data['support_ticket_id'] = ticket_id
+    db = get_db()
+    c = db.cursor()
+    c.execute('''
+        SELECT st.*, u.camelot_name, u.real_name, u.telegram_id 
+        FROM support_tickets st
+        JOIN users u ON st.user_id = u.id
+        WHERE st.id = ?
+    ''', (ticket_id,))
+    ticket = c.fetchone()
+    db.close()
+    if not ticket:
+        await query.edit_message_text("❌ تیکت یافت نشد.")
+        return
+    created = datetime.strptime(ticket['created_at'], '%Y-%m-%d %H:%M:%S')
+    jcreated = jdatetime.datetime.fromgregorian(datetime=created)
+    date_str = jcreated.strftime('%Y/%m/%d - %H:%M')
+    await query.edit_message_text(
+        f"📩 **پاسخ به تیکت #{ticket_id}**\n━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 کاربر: {ticket['camelot_name']} ({ticket['real_name']})\n"
+        f"🆔 آیدی تلگرام: {ticket['telegram_id']}\n"
+        f"🕐 زمان ارسال: {date_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📝 **پیام کاربر:**\n{ticket['message']}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"لطفاً پاسخ خود را وارد کنید:\n"
+        f"(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return ADMIN_SUPPORT_REPLY
+
+async def admin_support_reply_receive(update: Update, context):
+    text = update.message.text
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    ticket_id = context.user_data.get('support_ticket_id')
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ ارسال پاسخ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
+        context.user_data.pop('support_ticket_id', None)
+        return ConversationHandler.END
+    if not ticket_id:
+        await update.message.reply_text("❌ خطا: شناسه تیکت یافت نشد.")
+        return ConversationHandler.END
+    db = get_db()
+    c = db.cursor()
+    c.execute('''
+        SELECT st.*, u.telegram_id, u.camelot_name 
+        FROM support_tickets st
+        JOIN users u ON st.user_id = u.id
+        WHERE st.id = ?
+    ''', (ticket_id,))
+    ticket = c.fetchone()
+    if not ticket:
+        db.close()
+        await update.message.reply_text("❌ تیکت یافت نشد.")
+        return ConversationHandler.END
+    try:
+        await context.bot.send_message(
+            ticket['telegram_id'],
+            f"📩 **پاسخ به پیام شما** (تیکت #{ticket_id})\n━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📝 **پاسخ:**\n{text}\n\n"
+            f"🕐 زمان: {get_jalali_date()}",
+            parse_mode='Markdown'
+        )
+        user_received = True
+    except Exception as e:
+        logger.error(f"خطا در ارسال پاسخ به کاربر {ticket['telegram_id']}: {e}")
+        user_received = False
+    c.execute('''
+        UPDATE support_tickets 
+        SET reply = ?, status = 'replied', replied_at = CURRENT_TIMESTAMP 
+        WHERE id = ?
+    ''', (text, ticket_id))
+    db.commit()
+    db.close()
+    log_audit(user_id, 'support_reply', f'ticket:{ticket_id}', f'user:{ticket["telegram_id"]}')
+    if user_received:
+        await update.message.reply_text(
+            f"✅ **پاسخ شما با موفقیت ارسال شد.**\n\n"
+            f"تیکت #{ticket_id} - کاربر: {ticket['camelot_name']}",
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ **پاسخ در دیتابیس ذخیره شد ولی ارسال به کاربر با خطا مواجه شد.**\n"
+            f"تیکت #{ticket_id}",
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
+        )
+    await log_to_system('support', f'پاسخ به تیکت #{ticket_id}', f'کاربر: {ticket["camelot_name"]}\nپاسخ: {text}', actor_id=user_id, target_id=ticket['user_id'])
+    context.user_data.pop('support_ticket_id', None)
+    return ConversationHandler.END
+
+# ==================== مدیریت کاربران ====================
+async def admin_users_list(update: Update, context, page=0):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    db = get_db()
+    c = db.cursor()
+    c.execute('SELECT COUNT(*) FROM users')
+    total_users = c.fetchone()[0]
+    if total_users == 0:
+        db.close()
+        await query.edit_message_text(
+            "📭 **هیچ کاربری در بانک ثبت‌نام نکرده است.**",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_panel")]])
+        )
+        return
+    offset = page * USERS_PER_PAGE
+    c.execute('''
+        SELECT u.id, u.telegram_id, u.real_name, u.camelot_name, u.national_id, u.role, u.created_at,
+               a.account_number, a.balance, a.blocked_balance, a.credit_score, a.status, a.notes
+        FROM users u
+        JOIN accounts a ON u.id = a.user_id
+        ORDER BY u.created_at DESC
+        LIMIT ? OFFSET ?
+    ''', (USERS_PER_PAGE, offset))
+    users = c.fetchall()
+    db.close()
+    text = f"👥 **لیست کاربران بانک کملوت**\n━━━━━━━━━━━━━━━━━━━\n"
+    text += f"تعداد کل: {total_users} کاربر | صفحه {page+1}\n━━━━━━━━━━━━━━━━━━━\n\n"
+    viewer_role = get_user_role_display(user_id)
+    is_viewer_employee = is_employee(user_id)
+    for idx, u in enumerate(users, start=offset+1):
+        if is_viewer_employee and u['role'] in ['king', 'owner']:
+            continue
+        role_names = {'citizen':'شهروند', 'employee':'کارمند', 'king':'شاه', 'owner':'مالک'}
+        role_persian = role_names.get(u['role'], 'نامشخص')
+        status_persian = "✅ فعال" if u['status'] == 'active' else "🚫 مسدود"
+        text += f"**{idx}. {u['real_name']}** ({u['camelot_name']})\n"
+        text += f"🆔 کدملی: {u['national_id']}\n"
+        text += f"🏦 شماره حساب: {u['account_number']}\n"
+        text += f"💰 موجودی: {u['balance']} ART\n"
+        text += f"🔒 موجودی بلوکه: {u['blocked_balance']} ART\n"
+        text += f"⭐ امتیاز اعتباری: {u['credit_score']}\n"
+        text += f"👑 نقش: {role_persian}\n"
+        text += f"📊 وضعیت: {status_persian}\n"
+        text += f"📱 آیدی تلگرام: {u['telegram_id']}\n"
+        text += f"📝 توضیحات: {u['notes'] or 'ندارد'}\n"
+        created = datetime.strptime(u['created_at'], '%Y-%m-%d %H:%M:%S')
+        jcreated = jdatetime.datetime.fromgregorian(datetime=created)
+        text += f"📅 تاریخ افتتاح: {jcreated.strftime('%Y/%m/%d')}\n"
+        text += f"━━━━━━━━━━━━━━━━━━━\n"
+    keyboard = []
+    nav_buttons = []
+    total_pages = (total_users + USERS_PER_PAGE - 1) // USERS_PER_PAGE
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"admin_users_page_{page-1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("➡️ بعدی", callback_data=f"admin_users_page_{page+1}"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    keyboard.append([InlineKeyboardButton("🔍 مدیریت کاربر", callback_data="admin_user_manage")])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="back_to_panel")])
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def admin_users_page_handler(update: Update, context):
+    query = update.callback_query
+    data = query.data
+    page = int(data.split('_')[3])
+    await admin_users_list(update, context, page)
+
+async def admin_user_manage_start(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    await query.edit_message_text(
+        "🔍 **مدیریت کاربر**\n\n"
+        "لطفاً کد ملی کملوت کاربر مورد نظر را وارد کنید:\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_user_search'
+
+async def admin_user_search(update: Update, context):
+    text = update.message.text.strip()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    if text.lower() == '/cancel':
+        await update.message.reply_text("❌ مدیریت کاربر لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
+        return ConversationHandler.END
+    if len(text) != 6 or not text.isdigit():
+        await update.message.reply_text("❌ کد ملی باید ۶ رقم باشد. دوباره وارد کنید:")
+        return 'admin_user_search'
+    db = get_db()
+    c = db.cursor()
+    c.execute('''
+        SELECT u.id, u.telegram_id, u.real_name, u.camelot_name, u.national_id, u.role, u.created_at,
+               a.id as account_id, a.account_number, a.balance, a.blocked_balance, a.credit_score, 
+               a.status, a.password, a.notes
+        FROM users u
+        JOIN accounts a ON u.id = a.user_id
+        WHERE u.national_id = ?
+    ''', (text,))
+    user = c.fetchone()
+    db.close()
+    if not user:
+        await update.message.reply_text("❌ کاربری با این کد ملی یافت نشد. دوباره وارد کنید:")
+        return 'admin_user_search'
+    if is_employee(user_id) and user['role'] in ['king', 'owner']:
+        await update.message.reply_text("⛔ شما دسترسی به اطلاعات این کاربر را ندارید.")
+        return ConversationHandler.END
+    context.user_data['admin_target_user_id'] = user['id']
+    context.user_data['admin_target_account_id'] = user['account_id']
+    role_names = {'citizen':'شهروند', 'employee':'کارمند', 'king':'شاه', 'owner':'مالک'}
+    role_persian = role_names.get(user['role'], 'نامشخص')
+    status_persian = "✅ فعال" if user['status'] == 'active' else "🚫 مسدود"
+    created = datetime.strptime(user['created_at'], '%Y-%m-%d %H:%M:%S')
+    jcreated = jdatetime.datetime.fromgregorian(datetime=created)
+    date_str = jcreated.strftime('%Y/%m/%d')
+    info_text = f"""👤 **اطلاعات کاربر**
+━━━━━━━━━━━━━━━━━━━
+📛 **نام واقعی:** {user['real_name']}
+⚔️ **نام کملوتی:** {user['camelot_name']}
+🆔 **کد ملی:** {user['national_id']}
+🏦 **شماره حساب:** `{user['account_number']}`
+🔐 **رمز حساب:** `{user['password']}`
+💰 **موجودی:** {user['balance']} ART
+🔒 **موجودی بلوکه:** {user['blocked_balance']} ART
+⭐ **امتیاز اعتباری:** {user['credit_score']}
+👑 **نقش:** {role_persian}
+📊 **وضعیت:** {status_persian}
+📱 **آیدی تلگرام:** `{user['telegram_id']}`
+📅 **تاریخ افتتاح:** {date_str}
+📝 **توضیحات:** {user['notes'] or 'ندارد'}
+━━━━━━━━━━━━━━━━━━━
+"""
+    keyboard = []
+    if is_king_or_owner(user_id) or is_employee(user_id):
+        keyboard.append([InlineKeyboardButton("💰 واریز وجه", callback_data=f"admin_add_balance_{user['account_id']}")])
+        keyboard.append([InlineKeyboardButton("🧊 بلوکه کردن موجودی", callback_data=f"admin_freeze_balance_{user['account_id']}")])
+        keyboard.append([InlineKeyboardButton("📤 برداشت موجودی", callback_data=f"admin_withdraw_balance_{user['account_id']}")])
+        keyboard.append([InlineKeyboardButton("✏️ تغییر توضیحات", callback_data=f"admin_edit_notes_{user['account_id']}")])
+    if is_king_or_owner(user_id):
+        keyboard.append([InlineKeyboardButton("✏️ تغییر نام کملوتی", callback_data=f"admin_edit_camelot_{user['id']}")])
+        keyboard.append([InlineKeyboardButton("📱 تغییر آیدی تلگرام", callback_data=f"admin_edit_telegram_{user['id']}")])
+        keyboard.append([InlineKeyboardButton("🆔 تغییر کد ملی", callback_data=f"admin_edit_national_{user['id']}")])
+        keyboard.append([InlineKeyboardButton("🔢 تغییر شماره حساب", callback_data=f"admin_edit_account_{user['account_id']}")])
+        keyboard.append([InlineKeyboardButton("📊 تغییر وضعیت حساب", callback_data=f"admin_change_status_{user['account_id']}")])
+        keyboard.append([InlineKeyboardButton("⭐ تغییر امتیاز اعتباری", callback_data=f"admin_change_score_{user['account_id']}")])
+        keyboard.append([InlineKeyboardButton("👑 تغییر نقش کاربر", callback_data=f"admin_change_role_{user['id']}")])
+    if is_employee(user_id):
+        keyboard.append([InlineKeyboardButton("📨 ارسال گزارش به مدیریت", callback_data=f"admin_report_user_{user['id']}")])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به لیست کاربران", callback_data="admin_users")])
+    await update.message.reply_text(
+        info_text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+    context.user_data.pop('admin_target_user_id', None)
+    context.user_data.pop('admin_target_account_id', None)
+    return ConversationHandler.END
+
+# ==================== توابع مدیریت کاربر ====================
+# (برای حفظ اختصار، این توابع قبلاً در کد وجود دارند. لطفاً از نسخه قبلی کپی کنید.)
+
+# ==================== لاگ‌های سیستم ====================
+async def admin_logs_list(update: Update, context, page=0, log_type=None):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    if not is_admin(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    offset = page * LOGS_PER_PAGE
+    logs, total = get_system_logs(LOGS_PER_PAGE, offset, log_type)
+    if not logs:
+        await query.edit_message_text(
+            "📭 **هیچ لاگی در سیستم ثبت نشده است.**",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_panel")]])
+        )
+        return
+    text = f"📋 **لاگ‌های سیستم**\n━━━━━━━━━━━━━━━━━━━\n"
+    text += f"تعداد کل: {total} | صفحه {page+1}\n━━━━━━━━━━━━━━━━━━━\n\n"
+    for log in logs:
+        created = datetime.strptime(log['created_at'], '%Y-%m-%d %H:%M:%S')
+        jcreated = jdatetime.datetime.fromgregorian(datetime=created)
+        date_str = jcreated.strftime('%Y/%m/%d - %H:%M')
+        log_type_emoji = {
+            'transaction': '💸',
+            'admin_action': '⚙️',
+            'support': '🆘',
+            'report': '📨',
+            'error': '❌',
+            'system': '🔧'
+        }.get(log['log_type'], '📌')
+        actor = log['actor_name'] or 'سیستم'
+        target = log['target_name'] or '-'
+        text += f"{log_type_emoji} **{log['title']}**\n"
+        text += f"📝 {log['content'][:100]}{'...' if len(log['content']) > 100 else ''}\n"
+        text += f"👤 {actor} → {target}\n"
+        text += f"🕐 {date_str}\n━━━━━━━━━━━━━━━━━━━\n"
+    keyboard = []
+    nav_buttons = []
+    total_pages = (total + LOGS_PER_PAGE - 1) // LOGS_PER_PAGE
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"admin_logs_page_{log_type or 'all'}_{page-1}"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("➡️ بعدی", callback_data=f"admin_logs_page_{log_type or 'all'}_{page+1}"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    filter_buttons = [
+        ("💸 تراکنش", "transaction"),
+        ("⚙️ مدیریت", "admin_action"),
+        ("🆘 پشتیبانی", "support"),
+        ("📨 گزارش", "report"),
+        ("🔧 سیستم", "system")
+    ]
+    filter_row = []
+    for label, value in filter_buttons:
+        if log_type == value:
+            label = f"✅ {label}"
+        filter_row.append(InlineKeyboardButton(label, callback_data=f"admin_logs_filter_{value}"))
+    keyboard.append(filter_row)
+    keyboard.append([InlineKeyboardButton("📋 همه لاگ‌ها", callback_data="admin_logs_filter_all")])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="back_to_panel")])
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def admin_logs_page_handler(update: Update, context):
+    query = update.callback_query
+    data = query.data
+    parts = data.split('_')
+    log_type = parts[3] if parts[3] != 'all' else None
+    page = int(parts[4])
+    await admin_logs_list(update, context, page, log_type)
+
+async def admin_logs_filter_handler(update: Update, context):
+    query = update.callback_query
+    data = query.data
+    log_type = data.replace('admin_logs_filter_', '')
+    if log_type == 'all':
+        log_type = None
+    await admin_logs_list(update, context, 0, log_type)
+
+# ==================== پشتیبان‌گیری و بازیابی (فقط مالک) ====================
+async def admin_backup_menu(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user or user['role'] != 'owner':
+        await query.edit_message_text("⛔ دسترسی ندارید. این بخش فقط برای مالک است.")
+        return
+    keyboard = [
+        [InlineKeyboardButton("📥 گرفتن پشتیبان", callback_data="admin_backup_export")],
+        [InlineKeyboardButton("📤 بازیابی از پشتیبان", callback_data="admin_backup_import")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_panel")]
+    ]
+    await query.edit_message_text(
+        "💾 **پشتیبان‌گیری و بازیابی**\n\n"
+        "• **گرفتن پشتیبان:** یک فایل JSON کامل از تمام اطلاعات بانک تهیه می‌شود.\n"
+        "• **بازیابی:** با ارسال فایل پشتیبان، اطلاعات قبلی بازگردانده می‌شود.\n\n"
+        "⚠️ **هشدار:** بازیابی تمام اطلاعات فعلی را بازنویسی می‌کند!",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def admin_backup_export(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user or user['role'] != 'owner':
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    await query.edit_message_text("📥 در حال تهیه پشتیبان... لطفاً صبر کنید.", parse_mode='Markdown')
+    try:
+        json_data = export_full_backup()
+        file_obj = io.BytesIO(json_data.encode('utf-8'))
+        file_obj.name = f"camelot_backup_{datetime.now(TEHRAN_TZ).strftime('%Y%m%d_%H%M%S')}.json"
+        await context.bot.send_document(
+            chat_id=user_id,
+            document=file_obj,
+            caption="💾 **پشتیبان بانک کملوت**\n\n"
+                    f"🕐 تاریخ: {get_jalali_date()}\n"
+                    "📌 این فایل شامل تمام اطلاعات بانک است.\n"
+                    "برای بازیابی، از بخش «بازیابی از پشتیبان» استفاده کنید.",
+            parse_mode='Markdown'
+        )
+        await log_to_system('admin_action', 'پشتیبان‌گیری', f'توسط: {user["camelot_name"]}', actor_id=user_id)
+        await query.edit_message_text(
+            "✅ **پشتیبان با موفقیت تهیه و ارسال شد.**\n\n"
+            "فایل JSON را در جای امن نگهداری کنید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به منو", callback_data="admin_backup")]]),
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"خطا در تهیه پشتیبان: {e}")
+        await query.edit_message_text(
+            f"❌ خطا در تهیه پشتیبان: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+        )
+
+async def admin_backup_import_start(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user or user['role'] != 'owner':
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    await query.edit_message_text(
+        "📤 **بازیابی از پشتیبان**\n\n"
+        "⚠️ **هشدار مهم:**\n"
+        "• این عملیات **تمام اطلاعات فعلی** بانک را بازنویسی می‌کند.\n"
+        "• قبل از ادامه، حتماً یک پشتیبان جدید بگیرید.\n"
+        "• فقط فایل‌های JSON معتبر که توسط ربات تولید شده‌اند قابل قبول هستند.\n\n"
+        "لطفاً فایل پشتیبان (JSON) را ارسال کنید.\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return 'admin_backup_import_file'
+
+async def admin_backup_import_file(update: Update, context):
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    user = get_user_by_telegram_id(user_id)
+    if not user or user['role'] != 'owner':
+        await update.message.reply_text("⛔ دسترسی ندارید.")
+        return ConversationHandler.END
+    document = update.message.document
+    if not document:
+        await update.message.reply_text(
+            "❌ لطفاً یک فایل ارسال کنید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+        )
+        return 'admin_backup_import_file'
+    if not document.file_name.endswith('.json'):
+        await update.message.reply_text(
+            "❌ فقط فایل‌های JSON معتبر هستند.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+        )
+        return 'admin_backup_import_file'
+    await update.message.reply_text("📥 در حال دریافت فایل...", parse_mode='Markdown')
+    try:
+        file = await context.bot.get_file(document.file_id)
+        file_content = await file.download_as_bytearray()
+        json_data = file_content.decode('utf-8')
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ بله، بازیابی کن", callback_data="admin_backup_import_confirm")],
+            [InlineKeyboardButton("❌ لغو", callback_data="admin_backup")]
+        ])
+        await update.message.reply_text(
+            "⚠️ **تأیید نهایی بازیابی**\n\n"
+            "آیا از بازنویسی کامل اطلاعات مطمئن هستید؟\n"
+            "این عملیات قابل بازگشت نیست!",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+        context.user_data['backup_json_data'] = json_data
+    except Exception as e:
+        logger.error(f"خطا در دریافت فایل پشتیبان: {e}")
+        await update.message.reply_text(
+            f"❌ خطا در دریافت فایل: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+        )
+    return ConversationHandler.END
+
+async def admin_backup_import_confirm(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user or user['role'] != 'owner':
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    json_data = context.user_data.get('backup_json_data')
+    if not json_data:
+        await query.edit_message_text("❌ خطا: داده‌های پشتیبان یافت نشد.")
+        return
+    await query.edit_message_text("🔄 در حال بازیابی اطلاعات... لطفاً صبر کنید.", parse_mode='Markdown')
+    try:
+        success, message = import_full_backup(json_data)
+        if success:
+            await log_to_system('admin_action', 'بازیابی اطلاعات', f'توسط: {user["camelot_name"]}', actor_id=user_id)
+            await query.edit_message_text(
+                "✅ **بازیابی با موفقیت انجام شد!**\n\n"
+                "تمام اطلاعات بانک به نسخه پشتیبان بازگردانده شد.\n"
+                "لطفاً ربات را ری‌استارت کنید تا تغییرات اعمال شوند.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="back_to_panel")]]),
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text(
+                f"❌ **خطا در بازیابی:**\n{message}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+            )
+    except Exception as e:
+        logger.error(f"خطا در بازیابی: {e}")
+        await query.edit_message_text(
+            f"❌ خطا در بازیابی: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_backup")]])
+        )
+    context.user_data.pop('backup_json_data', None)
+
+# ==================== صندوق پیام ====================
+async def notifications_menu(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        await query.edit_message_text("❌ حساب ندارید.")
+        return
+    db = get_db()
+    c = db.cursor()
+    c.execute('''
+        SELECT * FROM notifications 
+        WHERE user_id = ? 
+        ORDER BY created_at DESC 
+        LIMIT 20
+    ''', (user['id'],))
+    notifications = c.fetchall()
+    db.close()
+    if not notifications:
+        await query.edit_message_text(
+            "📭 **صندوق پیام شما خالی است.**",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]]),
+            parse_mode='Markdown'
+        )
+        return
+    text = "📬 **صندوق پیام شما**\n━━━━━━━━━━━━━━━━━━━\n\n"
+    for n in notifications:
+        created = datetime.strptime(n['created_at'], '%Y-%m-%d %H:%M:%S')
+        jcreated = jdatetime.datetime.fromgregorian(datetime=created)
+        date_str = jcreated.strftime('%Y/%m/%d - %H:%M')
+        status_icon = "✅" if n['is_read'] else "🔵"
+        text += f"{status_icon} **{n['title']}**\n"
+        text += f"📝 {n['message']}\n"
+        text += f"🕐 {date_str}\n━━━━━━━━━━━━━━━━━━━\n"
+        if not n['is_read']:
+            db2 = get_db()
+            c2 = db2.cursor()
+            c2.execute('UPDATE notifications SET is_read = 1 WHERE id = ?', (n['id'],))
+            db2.commit()
+            db2.close()
+    keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]]
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+# ==================== placeholder ====================
+async def placeholder_handler(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    await query.edit_message_text(
+        "⏳ این بخش در حال تکمیل است... به زودی اضافه خواهد شد.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]])
+    )
 
 # ==================== main ====================
 def main():
