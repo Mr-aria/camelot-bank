@@ -17,9 +17,9 @@ EMPLOYEES_IDS = []
 from database import (
     init_db, get_db, get_user_by_telegram_id, get_account_by_user_id,
     get_account_by_number, get_user_by_account_number, get_setting,
-    generate_txid, log_audit, get_user_transactions, get_transaction_details,
-    send_notification, add_system_log, get_system_logs,
-    export_full_backup, import_full_backup
+    set_setting, generate_txid, log_audit, get_user_transactions,
+    get_transaction_details, send_notification, add_system_log,
+    get_system_logs, export_full_backup, import_full_backup
 )
 from utils import (
     create_bank_account, format_balance, format_receipt,
@@ -71,6 +71,12 @@ def is_employee(user_id: int) -> bool:
         return user['role'] == 'employee'
     return user_id in EMPLOYEES_IDS
 
+def is_owner(user_id: int) -> bool:
+    user = get_user_by_telegram_id(user_id)
+    if user:
+        return user['role'] == 'owner'
+    return user_id == OWNER_ID
+
 def get_user_role_display(user_id: int) -> str:
     user = get_user_by_telegram_id(user_id)
     if user:
@@ -89,6 +95,11 @@ def get_jalali_date_only():
     now = datetime.now(TEHRAN_TZ)
     jnow = jdatetime.datetime.fromgregorian(datetime=now)
     return jnow.strftime("%Y/%m/%d")
+
+def is_bot_online():
+    """بررسی وضعیت ربات (روشن/خاموش)"""
+    status = get_setting('bot_status')
+    return status != 'off'  # اگر 'off' نباشه، روشن است
 
 async def log_to_system(log_type, title, content, actor_id=None, target_id=None):
     add_system_log(log_type, title, content, actor_id, target_id)
@@ -113,7 +124,12 @@ async def send_message_to_user(context, user_id: int, text: str):
     except Exception as e:
         logger.error(f"خطا در ارسال پیام به {user_id}: {e}")
 
-def main_menu_keyboard(user_role: str = 'citizen'):
+def main_menu_keyboard(user_role: str = 'citizen', user_id: int = None):
+    """ساخت منوی اصلی با در نظر گرفتن وضعیت ربات"""
+    # اگر ربات خاموش است و کاربر مالک نیست، کیبورد خالی برگردان
+    if not is_bot_online() and not is_owner(user_id):
+        return None
+    
     keyboard = [
         [InlineKeyboardButton("💰 موجودی", callback_data="balance")],
         [InlineKeyboardButton("💸 انتقال وجه", callback_data="transfer")],
@@ -133,18 +149,57 @@ async def start(update: Update, context):
     user_id = update.effective_user.id
     username = update.effective_user.username or "بدون یوزرنیم"
     user = get_user_by_telegram_id(user_id)
+    
+    # بررسی وضعیت ربات برای کاربران غیرمالک
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text(
+            "⛔ **ربات در حال حاضر خاموش است.**\n\n"
+            "لطفاً بعداً تلاش کنید.",
+            parse_mode='Markdown'
+        )
+        return
 
     if not user:
+        # کاربر حساب ندارد
         context.user_data.clear()
         context.user_data['register_step'] = NAME_REAL
         context.user_data['username'] = username
-        await update.message.reply_text(
-            "🏦 **به بانک کملوت خوش آمدید!**\n\n"
-            "برای افتتاح حساب، نام واقعی خود را وارد کنید.\n"
-            "(برای لغو در هر مرحله، /cancel را بزنید)",
-            parse_mode='Markdown'
-        )
-        return NAME_REAL
+        
+        # پیام خوش‌آمدگویی با دکمه‌های ویژه برای مالک
+        if is_owner(user_id):
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 بازیابی اطلاعات", callback_data="restore_account")],
+                [InlineKeyboardButton("📝 ثبت‌نام جدید", callback_data="register_new")]
+            ])
+            await update.message.reply_text(
+                "🏦 **به بانک کملوت خوش آمدید!**\n\n"
+                "شما به عنوان مالک وارد شده‌اید.\n"
+                "• اگر قبلاً حساب داشته‌اید و اطلاعات آن را بازیابی کرده‌اید، روی «بازیابی اطلاعات» کلیک کنید.\n"
+                "• اگر می‌خواهید حساب جدید بسازید، روی «ثبت‌نام جدید» کلیک کنید.",
+                reply_markup=keyboard,
+                parse_mode='Markdown'
+            )
+            return
+        else:
+            # کاربر عادی - شروع ثبت‌نام
+            await update.message.reply_text(
+                "🏦 **به بانک کملوت خوش آمدید!**\n\n"
+                "برای افتتاح حساب، نام واقعی خود را وارد کنید.\n"
+                "(برای لغو در هر مرحله، /cancel را بزنید)\n\n"
+                "💡 اگر قبلاً حساب داشته‌اید، روی دکمه «بررسی مجدد» کلیک کنید.",
+                parse_mode='Markdown'
+            )
+            # دکمه بررسی مجدد برای غیرمالک‌ها
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 بررسی مجدد حساب", callback_data="refresh_role")]
+            ])
+            await update.message.reply_text(
+                "🔄 **بررسی مجدد حساب**\n\n"
+                "اگر قبلاً حساب بانکی داشته‌اید، روی دکمه زیر کلیک کنید تا اطلاعات شما بازیابی شود.",
+                reply_markup=keyboard,
+                parse_mode='Markdown'
+            )
+            return NAME_REAL
 
     acc = get_account_by_user_id(user['id'])
     if not acc:
@@ -152,8 +207,126 @@ async def start(update: Update, context):
         return
 
     welcome = get_setting('welcome_message') or "درود👋\nخوش اومدین به بانک کملوت💰"
-    await update.message.reply_text(welcome, reply_markup=main_menu_keyboard(user['role']))
+    await update.message.reply_text(
+        welcome,
+        reply_markup=main_menu_keyboard(user['role'], user_id)
+    )
     return ConversationHandler.END
+
+async def register_new_callback(update: Update, context):
+    """شروع ثبت‌نام جدید برای مالک"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    username = update.effective_user.username or "بدون یوزرنیم"
+    
+    context.user_data.clear()
+    context.user_data['register_step'] = NAME_REAL
+    context.user_data['username'] = username
+    
+    await query.edit_message_text(
+        "📝 **ثبت‌نام جدید**\n\n"
+        "لطفاً نام واقعی خود را وارد کنید:\n"
+        "(برای لغو /cancel بزنید)",
+        parse_mode='Markdown'
+    )
+    return NAME_REAL
+
+async def restore_account_callback(update: Update, context):
+    """بازیابی اطلاعات حساب مالک (بدون نیاز به ثبت‌نام مجدد)"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_owner(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    # بررسی وجود کاربر در دیتابیس
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        await query.edit_message_text(
+            "❌ **هیچ اطلاعاتی برای شما یافت نشد.**\n\n"
+            "اگر برای اولین بار است که از ربات استفاده می‌کنید، لطفاً از گزینه «ثبت‌نام جدید» استفاده کنید.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    acc = get_account_by_user_id(user['id'])
+    if not acc:
+        await query.edit_message_text(
+            "❌ **حساب بانکی برای شما یافت نشد.**\n\n"
+            "لطفاً از گزینه «ثبت‌نام جدید» استفاده کنید.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # ورود موفق - نمایش منوی اصلی
+    welcome = get_setting('welcome_message') or "درود👋\nخوش اومدین به بانک کملوت💰"
+    await query.edit_message_text(
+        f"✅ **ورود موفقیت‌آمیز!**\n\n"
+        f"{welcome}",
+        reply_markup=main_menu_keyboard(user['role'], user_id),
+        parse_mode='Markdown'
+    )
+    
+    await log_to_system('system', 'بازیابی اطلاعات مالک', f'کاربر: {user["camelot_name"]}', actor_id=user_id)
+
+async def refresh_role_callback(update: Update, context):
+    """بررسی مجدد نقش کاربر (برای غیرمالک‌ها)"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    # اگر کاربر مالک است، این دکمه نباید نمایش داده شود
+    if is_owner(user_id):
+        await query.edit_message_text(
+            "⛔ شما مالک هستید. لطفاً از گزینه «بازیابی اطلاعات» استفاده کنید.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        await query.edit_message_text(
+            "❌ شما هنوز حساب بانکی ندارید. لطفاً /start کنید.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # تعیین نقش جدید
+    if user_id == OWNER_ID:
+        new_role = 'owner'
+    elif user_id == KING_ID:
+        new_role = 'king'
+    elif user_id in EMPLOYEES_IDS:
+        new_role = 'employee'
+    else:
+        new_role = 'citizen'
+    
+    current_role = user['role']
+    if current_role == new_role:
+        await query.edit_message_text(
+            f"✅ نقش شما در حال حاضر همان {get_user_role_display(user_id)} است.",
+            reply_markup=main_menu_keyboard(current_role, user_id),
+            parse_mode='Markdown'
+        )
+        return
+    
+    db = get_db()
+    c = db.cursor()
+    c.execute("UPDATE users SET role = ? WHERE telegram_id = ?", (new_role, user_id))
+    db.commit()
+    db.close()
+    log_audit(user_id, 'role_refresh', f'old:{current_role}', f'new:{new_role}')
+    
+    await query.edit_message_text(
+        f"✅ **نقش شما به‌روز شد!**\n\n"
+        f"👑 نقش جدید: {get_user_role_display(user_id)}\n\n"
+        f"لطفاً دوباره از منوی اصلی استفاده کنید.",
+        reply_markup=main_menu_keyboard(new_role, user_id),
+        parse_mode='Markdown'
+    )
 
 async def cancel(update: Update, context):
     user_id = update.effective_user.id
@@ -164,7 +337,7 @@ async def cancel(update: Update, context):
         if acc:
             await update.message.reply_text(
                 "❌ عملیات لغو شد.",
-                reply_markup=main_menu_keyboard(user['role'])
+                reply_markup=main_menu_keyboard(user['role'], user_id)
             )
         else:
             await update.message.reply_text("❌ عملیات لغو شد.")
@@ -177,6 +350,11 @@ async def balance_callback(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     user = get_user_by_telegram_id(user_id)
     if not user:
         await query.edit_message_text("❌ حساب ندارید. لطفاً /start بزنید.")
@@ -186,12 +364,20 @@ async def balance_callback(update: Update, context):
         await query.edit_message_text("❌ حساب بانکی یافت نشد.")
         return
     balance_text = format_balance(acc['balance'], acc['blocked_balance'])
-    await query.edit_message_text(balance_text, reply_markup=main_menu_keyboard(user['role']))
+    await query.edit_message_text(
+        balance_text,
+        reply_markup=main_menu_keyboard(user['role'], user_id)
+    )
 
 async def my_info_callback(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     user = get_user_by_telegram_id(user_id)
     if not user or not (acc := get_account_by_user_id(user['id'])):
         await query.edit_message_text("❌ اطلاعاتی یافت نشد.")
@@ -216,9 +402,19 @@ async def my_info_callback(update: Update, context):
     await query.edit_message_text(info_text, reply_markup=keyboard, parse_mode='Markdown')
 
 async def refresh_role(update: Update, context):
+    """بررسی مجدد نقش کاربر (دسترسی عمومی)"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
+    user = get_user_by_telegram_id(user_id)
+    if not user:
+        await query.edit_message_text("❌ شما هنوز حساب بانکی ندارید. لطفاً اول /start کنید.")
+        return
     
     if user_id == OWNER_ID:
         new_role = 'owner'
@@ -229,16 +425,11 @@ async def refresh_role(update: Update, context):
     else:
         new_role = 'citizen'
     
-    user = get_user_by_telegram_id(user_id)
-    if not user:
-        await query.edit_message_text("❌ شما هنوز حساب بانکی ندارید. لطفاً اول /start کنید.")
-        return
-    
     current_role = user['role']
     if current_role == new_role:
         await query.edit_message_text(
             f"✅ نقش شما در حال حاضر همان {get_user_role_display(user_id)} است.",
-            reply_markup=main_menu_keyboard(current_role)
+            reply_markup=main_menu_keyboard(current_role, user_id)
         )
         return
     
@@ -253,13 +444,18 @@ async def refresh_role(update: Update, context):
         f"✅ **نقش شما به‌روز شد!**\n\n"
         f"👑 نقش جدید: {get_user_role_display(user_id)}\n\n"
         f"لطفاً دوباره از منوی اصلی استفاده کنید.",
-        reply_markup=main_menu_keyboard(new_role)
+        reply_markup=main_menu_keyboard(new_role, user_id)
     )
 
 async def my_credit_callback(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     user = get_user_by_telegram_id(user_id)
     if not user or not (acc := get_account_by_user_id(user['id'])):
         await query.edit_message_text("❌ اطلاعاتی یافت نشد.")
@@ -277,7 +473,7 @@ async def my_credit_callback(update: Update, context):
         rating = "⚫ بدحساب"
     await query.edit_message_text(
         f"📈 **اعتبار بانکی شما**\n━━━━━━━━━━━━━━━━━━━\n⭐ امتیاز: {score}\n🏷 رتبه: {rating}",
-        reply_markup=main_menu_keyboard(user['role']),
+        reply_markup=main_menu_keyboard(user['role'], user_id),
         parse_mode='Markdown'
     )
 
@@ -285,6 +481,11 @@ async def panel_callback(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     if not is_admin(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
@@ -304,11 +505,40 @@ async def panel_callback(update: Update, context):
     # فقط مالک
     if user['role'] == 'owner':
         keyboard.append([InlineKeyboardButton("💾 پشتیبان‌گیری و بازیابی", callback_data="admin_backup")])
+        # دکمه خاموش/روشن کردن ربات
+        if is_bot_online():
+            keyboard.append([InlineKeyboardButton("🔴 خاموش کردن ربات", callback_data="admin_toggle_bot")])
+        else:
+            keyboard.append([InlineKeyboardButton("🟢 روشن کردن ربات", callback_data="admin_toggle_bot")])
     
     keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")])
     
     panel_text = f"👑 **پنل مدیریت**\n👤 نقش: {role_persian}\n🕐 {now_jalali}"
     await query.edit_message_text(panel_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+async def admin_toggle_bot(update: Update, context):
+    """خاموش/روشن کردن ربات (فقط مالک)"""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_owner(user_id):
+        await query.edit_message_text("⛔ دسترسی ندارید.")
+        return
+    
+    current_status = get_setting('bot_status')
+    new_status = 'off' if current_status != 'off' else 'on'
+    set_setting('bot_status', new_status)
+    
+    status_text = "خاموش" if new_status == 'off' else "روشن"
+    await log_to_system('admin_action', f'ربات {status_text} شد', f'توسط: {get_user_role_display(user_id)}', actor_id=user_id)
+    
+    await query.edit_message_text(
+        f"✅ **ربات با موفقیت {status_text} شد.**\n\n"
+        f"وضعیت فعلی: {'🔴 خاموش' if new_status == 'off' else '🟢 روشن'}",
+        reply_markup=main_menu_keyboard('owner', user_id),
+        parse_mode='Markdown'
+    )
 
 async def back_to_panel(update: Update, context):
     query = update.callback_query
@@ -323,13 +553,15 @@ async def back_to_menu(update: Update, context):
     role = user['role'] if user else 'citizen'
     await query.edit_message_text(
         get_setting('welcome_message') or "منوی اصلی",
-        reply_markup=main_menu_keyboard(role)
+        reply_markup=main_menu_keyboard(role, user_id)
     )
 
 # ---------- ثبت‌نام ----------
 async def register_handler(update: Update, context):
     step = context.user_data.get('register_step')
     text = update.message.text
+    user_id = update.effective_user.id
+    
     if step == NAME_REAL:
         context.user_data['real_name'] = text
         context.user_data['register_step'] = NAME_CAMELOT
@@ -436,6 +668,11 @@ async def transfer_start(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     user = get_user_by_telegram_id(user_id)
     if not user or not (acc := get_account_by_user_id(user['id'])) or acc['status'] != 'active':
         await query.edit_message_text("❌ حساب مسدود یا وجود ندارد.")
@@ -447,8 +684,13 @@ async def transfer_start(update: Update, context):
 async def transfer_account_handler(update: Update, context):
     text = update.message.text.strip()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     if text.lower() == '/cancel':
-        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
         context.user_data.pop('transfer_step', None)
         return ConversationHandler.END
     if not text.isdigit() or len(text) != 6:
@@ -473,8 +715,13 @@ async def transfer_account_handler(update: Update, context):
 async def transfer_amount_handler(update: Update, context):
     text = update.message.text.strip()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     if text.lower() == '/cancel':
-        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
         context.user_data.pop('transfer_step', None)
         return ConversationHandler.END
     try:
@@ -501,8 +748,13 @@ async def transfer_amount_handler(update: Update, context):
 async def transfer_reason_handler(update: Update, context):
     text = update.message.text.strip()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     if text.lower() == '/cancel':
-        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
         context.user_data.pop('transfer_step', None)
         return ConversationHandler.END
     reason = text if text.lower() != 'ندارد' else None
@@ -514,8 +766,13 @@ async def transfer_reason_handler(update: Update, context):
 async def transfer_password_handler(update: Update, context):
     text = update.message.text.strip()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     if text.lower() == '/cancel':
-        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        await update.message.reply_text("❌ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
         context.user_data.pop('transfer_step', None)
         return ConversationHandler.END
     if not text.isdigit() or len(text) != 4:
@@ -569,6 +826,12 @@ async def transfer_password_handler(update: Update, context):
 async def loan_disabled_handler(update: Update, context):
     query = update.callback_query
     await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     await query.edit_message_text(
         "⏳ **بخش وام در حال به‌روزرسانی است**\n\n"
         "این بخش به زودی با امکانات کامل‌تر فعال خواهد شد.\n"
@@ -582,6 +845,11 @@ async def my_transactions_menu(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     user = get_user_by_telegram_id(user_id)
     if not user:
         await query.edit_message_text("❌ حساب ندارید. لطفاً /start بزنید.")
@@ -600,6 +868,11 @@ async def show_transactions(update: Update, context, tx_type=None, page=0):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     user = get_user_by_telegram_id(user_id)
     if not user:
         await query.edit_message_text("❌ حساب ندارید.")
@@ -658,6 +931,10 @@ async def admin_broadcast_start(update: Update, context):
     await query.answer()
     user_id = update.effective_user.id
     
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     if not is_king_or_owner(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
@@ -672,8 +949,14 @@ async def admin_broadcast_start(update: Update, context):
 
 async def admin_broadcast_receive(update: Update, context):
     text = update.message.text
+    user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     if text.lower() == '/cancel':
-        await update.message.reply_text("❌ ارسال پیام لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(update.effective_user.id)))
+        await update.message.reply_text("❌ ارسال پیام لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
         return ConversationHandler.END
     
     context.user_data['broadcast_text'] = text
@@ -704,6 +987,10 @@ async def admin_broadcast_confirm(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
     
     if query.data == "broadcast_yes":
         text = context.user_data.get('broadcast_text')
@@ -754,13 +1041,13 @@ async def admin_broadcast_confirm(update: Update, context):
             f"✅ **پیام همگانی با موفقیت ارسال شد!**\n\n"
             f"✅ موفق: {success_count}\n"
             f"❌ ناموفق: {fail_count}",
-            reply_markup=main_menu_keyboard(get_user_role_display(user_id))
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
         )
         
     else:
         await query.edit_message_text(
             "❌ ارسال پیام لغو شد.",
-            reply_markup=main_menu_keyboard(get_user_role_display(user_id))
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
         )
     
     context.user_data.pop('broadcast_text', None)
@@ -772,6 +1059,11 @@ async def support_start(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     user = get_user_by_telegram_id(user_id)
     if not user:
         await query.edit_message_text("❌ حساب ندارید. لطفاً /start بزنید.")
@@ -788,10 +1080,15 @@ async def support_start(update: Update, context):
 async def support_receive(update: Update, context):
     text = update.message.text
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     user = get_user_by_telegram_id(user_id)
     
     if text.lower() == '/cancel':
-        await update.message.reply_text("❌ ارسال پیام پشتیبانی لغو شد.", reply_markup=main_menu_keyboard(user['role'] if user else 'citizen'))
+        await update.message.reply_text("❌ ارسال پیام پشتیبانی لغو شد.", reply_markup=main_menu_keyboard(user['role'] if user else 'citizen', user_id))
         return ConversationHandler.END
     
     if not user:
@@ -831,7 +1128,7 @@ async def support_receive(update: Update, context):
     
     await update.message.reply_text(
         "✅ پیام شما ارسال شد.",
-        reply_markup=main_menu_keyboard(user['role'])
+        reply_markup=main_menu_keyboard(user['role'], user_id)
     )
     
     await log_to_system('support', f'تیکت پشتیبانی #{ticket_id}', f'از: {user["camelot_name"]}\nمتن: {text}', actor_id=user['id'])
@@ -843,6 +1140,10 @@ async def admin_support_list(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
     
     if not is_admin(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
@@ -893,6 +1194,10 @@ async def admin_support_reply_start(update: Update, context):
     await query.answer()
     user_id = update.effective_user.id
     
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     if not is_admin(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
@@ -936,10 +1241,15 @@ async def admin_support_reply_start(update: Update, context):
 async def admin_support_reply_receive(update: Update, context):
     text = update.message.text
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     ticket_id = context.user_data.get('support_ticket_id')
     
     if text.lower() == '/cancel':
-        await update.message.reply_text("❌ ارسال پاسخ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        await update.message.reply_text("❌ ارسال پاسخ لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
         context.user_data.pop('support_ticket_id', None)
         return ConversationHandler.END
     
@@ -989,13 +1299,13 @@ async def admin_support_reply_receive(update: Update, context):
         await update.message.reply_text(
             f"✅ **پاسخ شما با موفقیت ارسال شد.**\n\n"
             f"تیکت #{ticket_id} - کاربر: {ticket['camelot_name']}",
-            reply_markup=main_menu_keyboard(get_user_role_display(user_id))
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
         )
     else:
         await update.message.reply_text(
             f"⚠️ **پاسخ در دیتابیس ذخیره شد ولی ارسال به کاربر با خطا مواجه شد.**\n"
             f"تیکت #{ticket_id}",
-            reply_markup=main_menu_keyboard(get_user_role_display(user_id))
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
         )
     
     await log_to_system('support', f'پاسخ به تیکت #{ticket_id}', f'کاربر: {ticket["camelot_name"]}\nپاسخ: {text}', actor_id=user_id, target_id=ticket['user_id'])
@@ -1008,6 +1318,10 @@ async def admin_users_list(update: Update, context, page=0):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
     
     if not is_admin(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
@@ -1100,6 +1414,10 @@ async def admin_user_manage_start(update: Update, context):
     await query.answer()
     user_id = update.effective_user.id
     
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     if not is_admin(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
@@ -1116,8 +1434,12 @@ async def admin_user_search(update: Update, context):
     text = update.message.text.strip()
     user_id = update.effective_user.id
     
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     if text.lower() == '/cancel':
-        await update.message.reply_text("❌ مدیریت کاربر لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        await update.message.reply_text("❌ مدیریت کاربر لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
         return ConversationHandler.END
     
     if len(text) != 6 or not text.isdigit():
@@ -1215,6 +1537,10 @@ async def admin_edit_field_start(update: Update, context, field_name, target_id)
     await query.answer()
     user_id = update.effective_user.id
     
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     if not is_king_or_owner(user_id) and field_name != 'notes':
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
@@ -1242,8 +1568,12 @@ async def admin_edit_value(update: Update, context):
     text = update.message.text.strip()
     user_id = update.effective_user.id
     
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     if text.lower() == '/cancel':
-        await update.message.reply_text("❌ تغییر لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        await update.message.reply_text("❌ تغییر لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
         context.user_data.pop('admin_edit_field', None)
         context.user_data.pop('admin_edit_target', None)
         return ConversationHandler.END
@@ -1387,6 +1717,10 @@ async def admin_add_balance_start(update: Update, context, account_id):
     await query.answer()
     user_id = update.effective_user.id
     
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     if not is_admin(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
@@ -1404,8 +1738,12 @@ async def admin_add_balance_amount(update: Update, context):
     text = update.message.text.strip()
     user_id = update.effective_user.id
     
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     if text.lower() == '/cancel':
-        await update.message.reply_text("❌ واریز لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        await update.message.reply_text("❌ واریز لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
         context.user_data.pop('admin_add_balance_account', None)
         return ConversationHandler.END
     
@@ -1461,7 +1799,7 @@ async def admin_add_balance_amount(update: Update, context):
     await update.message.reply_text(
         f"✅ مبلغ {amount} ART با موفقیت به حساب واریز شد.\n"
         f"موجودی جدید: {new_balance} ART",
-        reply_markup=main_menu_keyboard(get_user_role_display(user_id))
+        reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
     )
     
     await log_to_system(
@@ -1481,6 +1819,10 @@ async def admin_withdraw_balance_start(update: Update, context, account_id):
     await query.answer()
     user_id = update.effective_user.id
     
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     if not is_admin(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
@@ -1498,8 +1840,12 @@ async def admin_withdraw_amount(update: Update, context):
     text = update.message.text.strip()
     user_id = update.effective_user.id
     
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     if text.lower() == '/cancel':
-        await update.message.reply_text("❌ برداشت لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        await update.message.reply_text("❌ برداشت لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
         context.user_data.pop('admin_withdraw_account', None)
         context.user_data.pop('admin_withdraw_amount', None)
         return ConversationHandler.END
@@ -1548,8 +1894,12 @@ async def admin_withdraw_destination(update: Update, context):
     text = update.message.text.strip()
     user_id = update.effective_user.id
     
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     if text.lower() == '/cancel':
-        await update.message.reply_text("❌ برداشت لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        await update.message.reply_text("❌ برداشت لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
         context.user_data.pop('admin_withdraw_account', None)
         context.user_data.pop('admin_withdraw_amount', None)
         context.user_data.pop('admin_withdraw_sender_account', None)
@@ -1628,7 +1978,7 @@ async def admin_withdraw_destination(update: Update, context):
     
     await update.message.reply_text(
         f"✅ مبلغ {amount} ART با موفقیت از حساب کاربر برداشت و به حساب {dest_account_number} واریز شد.",
-        reply_markup=main_menu_keyboard(get_user_role_display(update.effective_user.id))
+        reply_markup=main_menu_keyboard(get_user_role_display(update.effective_user.id), user_id)
     )
     
     sender_name = get_user_by_account_number(sender_account)
@@ -1657,6 +2007,10 @@ async def admin_freeze_balance_start(update: Update, context, account_id):
     await query.answer()
     user_id = update.effective_user.id
     
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     if not is_admin(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
@@ -1674,8 +2028,12 @@ async def admin_freeze_amount(update: Update, context):
     text = update.message.text.strip()
     user_id = update.effective_user.id
     
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     if text.lower() == '/cancel':
-        await update.message.reply_text("❌ بلوکه لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        await update.message.reply_text("❌ بلوکه لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
         context.user_data.pop('admin_freeze_account', None)
         return ConversationHandler.END
     
@@ -1728,7 +2086,7 @@ async def admin_freeze_amount(update: Update, context):
     await update.message.reply_text(
         f"✅ مبلغ {amount} ART با موفقیت بلوکه شد.\n"
         f"موجودی بلوکه شده جدید: {new_blocked} ART",
-        reply_markup=main_menu_keyboard(get_user_role_display(user_id))
+        reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
     )
     
     await log_to_system(
@@ -1747,6 +2105,10 @@ async def admin_change_status(update: Update, context, account_id):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
     
     if not is_king_or_owner(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
@@ -1777,7 +2139,7 @@ async def admin_change_status(update: Update, context, account_id):
     
     await query.edit_message_text(
         f"✅ وضعیت حساب با موفقیت به **{status_names[new_status]}** تغییر یافت.",
-        reply_markup=main_menu_keyboard(get_user_role_display(user_id)),
+        reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id),
         parse_mode='Markdown'
     )
     
@@ -1788,6 +2150,10 @@ async def admin_change_score_start(update: Update, context, account_id):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
     
     if not is_king_or_owner(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
@@ -1806,8 +2172,12 @@ async def admin_change_score_value(update: Update, context):
     text = update.message.text.strip()
     user_id = update.effective_user.id
     
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     if text.lower() == '/cancel':
-        await update.message.reply_text("❌ تغییر امتیاز لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        await update.message.reply_text("❌ تغییر امتیاز لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
         context.user_data.pop('admin_score_account', None)
         return ConversationHandler.END
     
@@ -1850,7 +2220,7 @@ async def admin_change_score_value(update: Update, context):
     
     await update.message.reply_text(
         f"✅ امتیاز اعتباری با موفقیت به **{new_score}** تغییر یافت.",
-        reply_markup=main_menu_keyboard(get_user_role_display(user_id)),
+        reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id),
         parse_mode='Markdown'
     )
     
@@ -1864,6 +2234,10 @@ async def admin_change_role(update: Update, context, user_id):
     query = update.callback_query
     await query.answer()
     admin_user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(admin_user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
     
     if not is_king_or_owner(admin_user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
@@ -1901,7 +2275,7 @@ async def admin_change_role(update: Update, context, user_id):
     
     await query.edit_message_text(
         f"✅ نقش کاربر با موفقیت به **{role_names[new_role]}** تغییر یافت.",
-        reply_markup=main_menu_keyboard(get_user_role_display(admin_user_id)),
+        reply_markup=main_menu_keyboard(get_user_role_display(admin_user_id), admin_user_id),
         parse_mode='Markdown'
     )
     
@@ -1912,6 +2286,10 @@ async def admin_report_user(update: Update, context, target_user_id):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
     
     if not is_employee(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
@@ -1929,10 +2307,15 @@ async def admin_report_user(update: Update, context, target_user_id):
 async def admin_report_reason(update: Update, context):
     text = update.message.text.strip()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     target_user_id = context.user_data.get('admin_report_target')
     
     if text.lower() == '/cancel':
-        await update.message.reply_text("❌ ارسال گزارش لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id)))
+        await update.message.reply_text("❌ ارسال گزارش لغو شد.", reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id))
         context.user_data.pop('admin_report_target', None)
         return ConversationHandler.END
     
@@ -1999,13 +2382,13 @@ async def admin_report_reason(update: Update, context):
         await update.message.reply_text(
             f"✅ **گزارش شما با موفقیت ارسال شد.**\n\n"
             f"کاربر: {target['camelot_name']}",
-            reply_markup=main_menu_keyboard(get_user_role_display(user_id))
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
         )
         await log_to_system('report', f'گزارش کارمند درباره {target["camelot_name"]}', f'دلیل: {text}', actor_id=user_id, target_id=target_user_id)
     else:
         await update.message.reply_text(
             "❌ ارسال گزارش با مشکل مواجه شد. لطفاً بعداً تلاش کنید.",
-            reply_markup=main_menu_keyboard(get_user_role_display(user_id))
+            reply_markup=main_menu_keyboard(get_user_role_display(user_id), user_id)
         )
     
     context.user_data.pop('admin_report_target', None)
@@ -2016,6 +2399,10 @@ async def admin_logs_list(update: Update, context, page=0, log_type=None):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
     
     if not is_admin(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
@@ -2111,6 +2498,11 @@ async def admin_backup_menu(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     user = get_user_by_telegram_id(user_id)
     
     if not user or user['role'] != 'owner':
@@ -2135,6 +2527,11 @@ async def admin_backup_export(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     user = get_user_by_telegram_id(user_id)
     
     if not user or user['role'] != 'owner':
@@ -2179,6 +2576,11 @@ async def admin_backup_import_start(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     user = get_user_by_telegram_id(user_id)
     
     if not user or user['role'] != 'owner':
@@ -2199,6 +2601,11 @@ async def admin_backup_import_start(update: Update, context):
 
 async def admin_backup_import_file(update: Update, context):
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await update.message.reply_text("⛔ ربات در حال حاضر خاموش است.")
+        return ConversationHandler.END
+    
     user = get_user_by_telegram_id(user_id)
     
     if not user or user['role'] != 'owner':
@@ -2254,6 +2661,11 @@ async def admin_backup_import_confirm(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     user = get_user_by_telegram_id(user_id)
     
     if not user or user['role'] != 'owner':
@@ -2300,6 +2712,11 @@ async def notifications_menu(update: Update, context):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     user = get_user_by_telegram_id(user_id)
     if not user:
         await query.edit_message_text("❌ حساب ندارید.")
@@ -2353,6 +2770,12 @@ async def notifications_menu(update: Update, context):
 async def placeholder_handler(update: Update, context):
     query = update.callback_query
     await query.answer()
+    user_id = update.effective_user.id
+    
+    if not is_bot_online() and not is_owner(user_id):
+        await query.edit_message_text("⛔ ربات در حال حاضر خاموش است.")
+        return
+    
     await query.edit_message_text(
         "⏳ این بخش در حال تکمیل است... به زودی اضافه خواهد شد.",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]])
@@ -2360,6 +2783,10 @@ async def placeholder_handler(update: Update, context):
 
 # ---------- main ----------
 def main():
+    # تنظیم پیش‌فرض برای وضعیت ربات
+    if get_setting('bot_status') is None:
+        set_setting('bot_status', 'on')
+    
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
     
@@ -2511,7 +2938,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_logs_page_handler, pattern="^admin_logs_page_"))
     app.add_handler(CallbackQueryHandler(admin_logs_filter_handler, pattern="^admin_logs_filter_"))
     
-    # پشتیبان‌گیری و بازیابی (فقط مالک)
+    # پشتیبان‌گیری و بازیابی
     app.add_handler(CallbackQueryHandler(admin_backup_menu, pattern="^admin_backup$"))
     app.add_handler(CallbackQueryHandler(admin_backup_export, pattern="^admin_backup_export$"))
     
@@ -2524,6 +2951,14 @@ def main():
     )
     app.add_handler(backup_import_conv)
     app.add_handler(CallbackQueryHandler(admin_backup_import_confirm, pattern="^admin_backup_import_confirm$"))
+    
+    # خاموش/روشن کردن ربات (فقط مالک)
+    app.add_handler(CallbackQueryHandler(admin_toggle_bot, pattern="^admin_toggle_bot$"))
+    
+    # دکمه‌های ویژه برای مالک
+    app.add_handler(CallbackQueryHandler(register_new_callback, pattern="^register_new$"))
+    app.add_handler(CallbackQueryHandler(restore_account_callback, pattern="^restore_account$"))
+    app.add_handler(CallbackQueryHandler(refresh_role_callback, pattern="^refresh_role$"))
     
     # دستورات اصلی
     app.add_handler(CommandHandler("start", start))
