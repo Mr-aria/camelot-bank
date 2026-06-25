@@ -3,9 +3,12 @@ import random
 from datetime import datetime, timedelta
 import pytz
 import jdatetime
+import json
+import logging
 
 DB_NAME = "camelot_bank.db"
 TEHRAN_TZ = pytz.timezone('Asia/Tehran')
+logger = logging.getLogger(__name__)
 
 def get_db():
     conn = sqlite3.connect(DB_NAME)
@@ -172,7 +175,7 @@ def init_db():
         FOREIGN KEY (user_id) REFERENCES users(id)
     )''')
     
-    # 15. system_logs (جدول جدید برای ذخیره همه لاگ‌ها)
+    # 15. system_logs
     c.execute('''CREATE TABLE IF NOT EXISTS system_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         log_type TEXT,
@@ -283,7 +286,7 @@ def log_audit(actor_id, action, target=None, details=None):
     conn.commit()
     conn.close()
 
-# ---------- توابع سیستمی جدید ----------
+# ---------- توابع سیستمی ----------
 def add_system_log(log_type, title, content, actor_id=None, target_id=None):
     """ذخیره یک لاگ در سیستم"""
     conn = get_db()
@@ -316,7 +319,6 @@ def get_system_logs(limit=50, offset=0, log_type=None):
     c.execute(query, params)
     logs = c.fetchall()
     
-    # دریافت تعداد کل
     count_query = 'SELECT COUNT(*) FROM system_logs'
     if log_type:
         count_query += ' WHERE log_type = ?'
@@ -326,6 +328,107 @@ def get_system_logs(limit=50, offset=0, log_type=None):
     total = c.fetchone()[0]
     conn.close()
     return logs, total
+
+# ---------- توابع پشتیبان‌گیری و بازیابی ----------
+def export_full_backup():
+    """گرفتن پشتیبان کامل از تمام جداول به صورت JSON"""
+    conn = get_db()
+    c = conn.cursor()
+    
+    backup_data = {
+        'version': '1.0',
+        'created_at': datetime.now(TEHRAN_TZ).isoformat(),
+        'tables': {}
+    }
+    
+    tables = [
+        'users', 'accounts', 'transactions', 'loans', 'credit_history',
+        'notifications', 'admin_requests', 'audit_logs', 'manager_pins',
+        'system_settings', 'treasury_log', 'loan_settings', 'loan_payments',
+        'support_tickets', 'system_logs'
+    ]
+    
+    for table in tables:
+        try:
+            c.execute(f'SELECT * FROM {table}')
+            rows = c.fetchall()
+            table_data = []
+            for row in rows:
+                row_dict = dict(row)
+                for key, value in row_dict.items():
+                    if isinstance(value, datetime):
+                        row_dict[key] = value.isoformat()
+                table_data.append(row_dict)
+            backup_data['tables'][table] = table_data
+        except sqlite3.OperationalError as e:
+            logger.warning(f"جدول {table} در دیتابیس وجود ندارد: {e}")
+            backup_data['tables'][table] = []
+    
+    conn.close()
+    return json.dumps(backup_data, ensure_ascii=False, indent=2)
+
+def import_full_backup(json_data):
+    """بازیابی کامل دیتابیس از فایل JSON پشتیبان"""
+    conn = get_db()
+    c = conn.cursor()
+    
+    try:
+        backup_data = json.loads(json_data)
+    except json.JSONDecodeError:
+        conn.close()
+        return False, "فایل پشتیبان معتبر نیست (فرمت JSON نامعتبر)"
+    
+    if 'tables' not in backup_data:
+        conn.close()
+        return False, "ساختار فایل پشتیبان معتبر نیست"
+    
+    # پاک کردن همه جداول
+    tables_to_clear = [
+        'loan_payments', 'loans', 'transactions', 'credit_history',
+        'notifications', 'admin_requests', 'audit_logs', 'manager_pins',
+        'system_logs', 'support_tickets', 'treasury_log',
+        'accounts', 'users', 'system_settings', 'loan_settings'
+    ]
+    
+    for table in tables_to_clear:
+        try:
+            c.execute(f'DELETE FROM {table}')
+        except sqlite3.OperationalError:
+            pass
+    
+    # وارد کردن داده‌ها
+    tables_order = [
+        'system_settings', 'loan_settings',
+        'users', 'accounts', 'transactions', 'loans', 'loan_payments',
+        'credit_history', 'notifications', 'admin_requests',
+        'audit_logs', 'manager_pins', 'system_logs', 'support_tickets',
+        'treasury_log'
+    ]
+    
+    for table in tables_order:
+        if table in backup_data['tables']:
+            rows = backup_data['tables'][table]
+            if rows:
+                columns = list(rows[0].keys())
+                placeholders = ','.join(['?'] * len(columns))
+                columns_str = ','.join([f'"{col}"' for col in columns])
+                
+                for row in rows:
+                    values = []
+                    for col in columns:
+                        val = row.get(col)
+                        if isinstance(val, str) and val.endswith('+00:00'):
+                            val = val.replace('+00:00', '')
+                        values.append(val)
+                    try:
+                        c.execute(f'INSERT OR REPLACE INTO {table} ({columns_str}) VALUES ({placeholders})', values)
+                    except sqlite3.IntegrityError as e:
+                        logger.warning(f"خطا در درج ردیف در {table}: {e}")
+                        continue
+    
+    conn.commit()
+    conn.close()
+    return True, "بازیابی با موفقیت انجام شد"
 
 # ---------- توابع دریافت اطلاعات ----------
 def get_user_by_telegram_id(telegram_id):
