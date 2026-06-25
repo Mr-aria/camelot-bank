@@ -2784,10 +2784,11 @@ async def placeholder_handler(update: Update, context):
 # ---------- main ----------
 def main():
     # تنظیم پیش‌فرض برای وضعیت ربات
-    if get_setting('bot_status') is None:
-        set_setting('bot_status', 'on')
     
     init_db()
+    if get_setting('bot_status') is None:
+        set_setting('bot_status', 'on')
+        
     app = Application.builder().token(BOT_TOKEN).build()
     
     # ثبت‌نام
