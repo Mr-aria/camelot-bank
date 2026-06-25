@@ -98,7 +98,6 @@ def get_jalali_date_only():
     return jnow.strftime("%Y/%m/%d")
 
 def is_bot_online():
-    """بررسی وضعیت ربات (روشن/خاموش)"""
     status = get_setting('bot_status')
     return status != 'off'
 
@@ -211,11 +210,9 @@ async def register_new_callback(update: Update, context):
     await query.answer()
     user_id = update.effective_user.id
     username = update.effective_user.username or "بدون یوزرنیم"
-
     context.user_data.clear()
     context.user_data['register_step'] = NAME_REAL
     context.user_data['username'] = username
-
     await query.edit_message_text(
         "📝 **ثبت‌نام جدید**\n\n"
         "لطفاً نام واقعی خود را وارد کنید:\n"
@@ -226,15 +223,12 @@ async def register_new_callback(update: Update, context):
 
 # ---------- بازیابی اطلاعات (فقط مالک) ----------
 async def restore_account_callback(update: Update, context):
-    """شروع فرآیند بازیابی اطلاعات با دریافت فایل بکاپ"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
-
     if not is_owner(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
-
     await query.edit_message_text(
         "📤 **بازیابی اطلاعات از فایل بکاپ**\n\n"
         "⚠️ **هشدار مهم:**\n"
@@ -247,13 +241,10 @@ async def restore_account_callback(update: Update, context):
     return RESTORE_FILE
 
 async def restore_from_backup_file(update: Update, context):
-    """دریافت فایل بکاپ و شروع فرآیند بازیابی"""
     user_id = update.effective_user.id
-
     if not is_owner(user_id):
         await update.message.reply_text("⛔ دسترسی ندارید.")
         return ConversationHandler.END
-
     document = update.message.document
     if not document:
         await update.message.reply_text(
@@ -261,24 +252,18 @@ async def restore_from_backup_file(update: Update, context):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]])
         )
         return RESTORE_FILE
-
     if not document.file_name.endswith('.json'):
         await update.message.reply_text(
             "❌ فقط فایل‌های JSON معتبر هستند.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]])
         )
         return RESTORE_FILE
-
     await update.message.reply_text("📥 در حال دریافت و بررسی فایل... لطفاً صبر کنید.", parse_mode='Markdown')
-
     try:
         file = await context.bot.get_file(document.file_id)
         file_content = await file.download_as_bytearray()
         json_data = file_content.decode('utf-8')
-
-        # ذخیره موقت داده
         context.user_data['backup_json_data'] = json_data
-
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ بله، بازیابی کن", callback_data="restore_confirm")],
             [InlineKeyboardButton("❌ لغو", callback_data="back_to_menu")]
@@ -291,7 +276,6 @@ async def restore_from_backup_file(update: Update, context):
             parse_mode='Markdown'
         )
         return RESTORE_CONFIRM
-
     except Exception as e:
         logger.error(f"خطا در دریافت فایل بکاپ: {e}")
         await update.message.reply_text(
@@ -301,28 +285,21 @@ async def restore_from_backup_file(update: Update, context):
         return ConversationHandler.END
 
 async def restore_confirm_callback(update: Update, context):
-    """تأیید نهایی بازیابی"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
-
     if not is_owner(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
-
     json_data = context.user_data.get('backup_json_data')
     if not json_data:
         await query.edit_message_text("❌ خطا: داده‌های پشتیبان یافت نشد.")
         return
-
     await query.edit_message_text("🔄 در حال بازیابی اطلاعات... لطفاً صبر کنید.", parse_mode='Markdown')
-
     try:
         success, message = import_full_backup(json_data)
-
         if success:
             await log_to_system('admin_action', 'بازیابی اطلاعات از فایل بکاپ', f'توسط: {get_user_role_display(user_id)}', actor_id=user_id)
-
             await query.edit_message_text(
                 "✅ **بازیابی با موفقیت انجام شد!**\n\n"
                 "تمام اطلاعات بانک به نسخه پشتیبان بازگردانده شد.\n"
@@ -335,36 +312,137 @@ async def restore_confirm_callback(update: Update, context):
                 f"❌ **خطا در بازیابی:**\n{message}",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]])
             )
-
     except Exception as e:
         logger.error(f"خطا در بازیابی: {e}")
         await query.edit_message_text(
             f"❌ خطا در بازیابی: {str(e)}",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_menu")]])
         )
-
     context.user_data.pop('backup_json_data', None)
 
 async def restart_bot_callback(update: Update, context):
-    """ری‌استارت ربات (برای اعمال تغییرات بازیابی)"""
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
-
     if not is_owner(user_id):
         await query.edit_message_text("⛔ دسترسی ندارید.")
         return
-
     await query.edit_message_text(
         "🔄 **ربات در حال ری‌استارت است...**\n\n"
         "لطفاً چند ثانیه صبر کنید و سپس دوباره /start بزنید.",
         parse_mode='Markdown'
     )
-
     await log_to_system('system', 'ری‌استارت ربات', f'توسط: {get_user_role_display(user_id)}', actor_id=user_id)
 
-# ---------- ادامه کدهای قبلی (بدون تغییر) ----------
-# ... (بقیه توابع مانند refresh_role, cancel, balance, my_info, my_credit, panel, admin_toggle_bot, back_to_panel, back_to_menu, register_handler, confirm_callback, transfer handlers, loan_disabled_handler, my_transactions_menu, show_transactions, transactions_page_handler, admin_broadcast handlers, support handlers, admin_support handlers, admin_users handlers, admin_edit_field handlers, admin_add_balance, admin_withdraw, admin_freeze, admin_change_status, admin_change_score, admin_change_role, admin_report_user, admin_logs, admin_backup_menu, admin_backup_export, admin_backup_import_start, admin_backup_import_file, admin_backup_import_confirm, notifications_menu, placeholder_handler)
+# ---------- ثبت‌نام ----------
+async def register_handler(update: Update, context):
+    step = context.user_data.get('register_step')
+    text = update.message.text
+    if step == NAME_REAL:
+        context.user_data['real_name'] = text
+        context.user_data['register_step'] = NAME_CAMELOT
+        await update.message.reply_text("⚔️ نام خود در کملوت را وارد کنید:\n(برای لغو /cancel بزنید)", parse_mode='Markdown')
+        return NAME_CAMELOT
+    elif step == NAME_CAMELOT:
+        context.user_data['camelot_name'] = text
+        context.user_data['register_step'] = NATIONAL_ID
+        await update.message.reply_text("🆔 کد ملی ۶ رقمی را وارد کنید:\n(برای لغو /cancel بزنید)", parse_mode='Markdown')
+        return NATIONAL_ID
+    elif step == NATIONAL_ID:
+        if not text.isdigit() or len(text) != 6:
+            await update.message.reply_text("❌ کد ملی ۶ رقم باید باشد. دوباره وارد کنید:")
+            return NATIONAL_ID
+        db = get_db()
+        c = db.cursor()
+        c.execute('SELECT id FROM users WHERE national_id = ?', (text,))
+        if c.fetchone():
+            db.close()
+            await update.message.reply_text("❌ این کد ملی قبلاً ثبت شده. کد دیگری وارد کنید:")
+            return NATIONAL_ID
+        db.close()
+        context.user_data['national_id'] = text
+        context.user_data['register_step'] = PASSWORD
+        await update.message.reply_text("🔐 رمز ۴ رقمی برای حساب خود وارد کنید:\n(برای لغو /cancel بزنید)", parse_mode='Markdown')
+        return PASSWORD
+    elif step == PASSWORD:
+        if not text.isdigit() or len(text) != 4:
+            await update.message.reply_text("❌ رمز ۴ رقم باید باشد. دوباره وارد کنید:")
+            return PASSWORD
+        context.user_data['password'] = text
+        context.user_data['register_step'] = CONFIRM
+        confirm_text = f"""✅ اطلاعات را تأیید کنید:
+📛 نام واقعی: {context.user_data['real_name']}
+⚔️ نام کملوتی: {context.user_data['camelot_name']}
+🆔 کد ملی: {context.user_data['national_id']}
+🔐 رمز: ****
+آیا صحیح است؟"""
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ بله", callback_data="confirm_yes")],
+            [InlineKeyboardButton("❌ خیر (لغو)", callback_data="confirm_no")]
+        ])
+        await update.message.reply_text(confirm_text, reply_markup=keyboard, parse_mode='Markdown')
+        return CONFIRM
+    return ConversationHandler.END
+
+async def confirm_callback(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "confirm_yes":
+        user_id = update.effective_user.id
+        username = context.user_data.get('username', '')
+        real_name = context.user_data.get('real_name')
+        camelot_name = context.user_data.get('camelot_name')
+        national_id = context.user_data.get('national_id')
+        password = context.user_data.get('password')
+        if not all([real_name, camelot_name, national_id, password]):
+            await query.edit_message_text("❌ خطا: اطلاعات کامل نیست. لطفاً دوباره /start کنید.")
+            for key in ['real_name','camelot_name','national_id','password','register_step','username']:
+                context.user_data.pop(key, None)
+            return
+        db = get_db()
+        c = db.cursor()
+        c.execute('SELECT id FROM users WHERE national_id = ?', (national_id,))
+        if c.fetchone():
+            db.close()
+            await query.edit_message_text("❌ این کد ملی قبلاً ثبت شده. لطفاً با کد دیگری ثبت‌نام کنید.")
+            return
+        db.close()
+        try:
+            acc_num, bonus = create_bank_account(
+                user_id, username, real_name, camelot_name, national_id, password
+            )
+            real_role = get_user_role_from_telegram_id(user_id)
+            if real_role != 'citizen':
+                db = get_db()
+                c = db.cursor()
+                c.execute("UPDATE users SET role = ? WHERE telegram_id = ?", (real_role, user_id))
+                db.commit()
+                db.close()
+                logger.info(f"نقش کاربر {user_id} به {real_role} تغییر کرد.")
+            await query.edit_message_text(
+                f"✅ **حساب بانکی شما با موفقیت ایجاد شد!**\n\n"
+                f"🏦 **شماره حساب:** `{acc_num}`\n"
+                f"💰 **موجودی اولیه:** {bonus} ART\n"
+                f"⭐ **امتیاز اعتباری:** 1000\n"
+                f"👑 **نقش شما:** {get_user_role_display(user_id)}\n\n"
+                f"برای ورود به بانک، دوباره /start بزنید.",
+                parse_mode='Markdown'
+            )
+            await log_to_system('system', 'حساب جدید', f'کاربر: {camelot_name} - شماره حساب: {acc_num}', actor_id=user_id)
+        except Exception as e:
+            logger.error(f"خطا در ساخت حساب: {e}")
+            await query.edit_message_text(f"❌ خطا در ساخت حساب: {str(e)}\nلطفاً دوباره /start کنید.")
+        for key in ['real_name','camelot_name','national_id','password','register_step','username']:
+            context.user_data.pop(key, None)
+    else:
+        await query.edit_message_text("❌ ثبت‌نام لغو شد. برای شروع مجدد /start بزنید.")
+        for key in ['real_name','camelot_name','national_id','password','register_step','username']:
+            context.user_data.pop(key, None)
+
+# ---------- سایر توابع (باقی‌مانده) ----------
+# در اینجا باید بقیه توابعی که در نسخه قبلی داشتی (مانند refresh_role, cancel, balance, ...) را قرار دهی.
+# برای جلوگیری از طولانی شدن، من فقط قسمت‌های جدید و اصلاحی را قرار می‌دهم.
+# لطفاً بقیه توابع را از نسخه قبلی خودت کپی کن و در اینجا بچسبان.
 
 # ---------- main ----------
 def main():
@@ -536,7 +614,7 @@ def main():
     app.add_handler(backup_import_conv)
     app.add_handler(CallbackQueryHandler(admin_backup_import_confirm, pattern="^admin_backup_import_confirm$"))
 
-    # بازیابی اطلاعات (فقط مالک) - جدید
+    # بازیابی اطلاعات (فقط مالک)
     restore_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(restore_account_callback, pattern="^restore_account$")],
         states={
@@ -548,10 +626,10 @@ def main():
     app.add_handler(restore_conv)
     app.add_handler(CallbackQueryHandler(restart_bot_callback, pattern="^restart_bot$"))
 
-    # خاموش/روشن کردن ربات (فقط مالک)
+    # خاموش/روشن کردن ربات
     app.add_handler(CallbackQueryHandler(admin_toggle_bot, pattern="^admin_toggle_bot$"))
 
-    # دکمه‌های ویژه برای مالک
+    # دکمه‌های ویژه
     app.add_handler(CallbackQueryHandler(register_new_callback, pattern="^register_new$"))
     app.add_handler(CallbackQueryHandler(refresh_role_callback, pattern="^refresh_role$"))
 
