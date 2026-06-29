@@ -2493,9 +2493,12 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # ثبت‌نام
+    # ثبت‌نام (تغییر یافته: افزودن register_new_callback به entry_points)
     app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            CallbackQueryHandler(register_new_callback, pattern="^register_new$")
+        ],
         states={
             NAME_REAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_handler)],
             NAME_CAMELOT: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_handler)],
@@ -2670,8 +2673,7 @@ def main():
     # خاموش/روشن کردن ربات
     app.add_handler(CallbackQueryHandler(admin_toggle_bot, pattern="^admin_toggle_bot$"))
 
-    # دکمه‌های ویژه
-    app.add_handler(CallbackQueryHandler(register_new_callback, pattern="^register_new$"))
+    # این خط حذف شد: app.add_handler(CallbackQueryHandler(register_new_callback, pattern="^register_new$"))
     app.add_handler(CallbackQueryHandler(refresh_role_callback, pattern="^refresh_role$"))
 
     # دستورات اصلی
